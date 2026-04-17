@@ -1,0 +1,277 @@
+@import "tailwindcss";
+
+@theme {
+  --color-hx-bg: #f5f7fa;
+  --color-hx-panel: #ffffff;
+  --color-hx-border: #d0d9e8;
+  --color-hx-neon: #0077cc;
+  --color-hx-neon-hover: #005fa3;
+  --color-hx-purple: #7c3aed;
+  --color-hx-text: #1a2540;
+  --color-hx-muted: #3d4f6e;
+  --color-hx-dim: #5a6e8e;
+  --color-hx-success: #00875a;
+  --color-hx-warning: #b8860b;
+  --color-hx-danger: #cc2244;
+}
+
+/* ── Theme overrides (applied via .theme-<id> on <html>) ── */
+
+/* Dark — deep navy */
+.dark,
+.theme-dark {
+  --color-hx-bg: #080a12;
+  --color-hx-panel: #0d1121;
+  --color-hx-border: #1e2d4a;
+  --color-hx-neon: #29b6d4;
+  --color-hx-neon-hover: #4ecde6;
+  --color-hx-purple: #9b55cc;
+  --color-hx-text: #d0dff0;
+  --color-hx-muted: #7890aa;
+  --color-hx-dim: #4a6080;
+  --color-hx-success: #22c97a;
+  --color-hx-warning: #d4aa00;
+  --color-hx-danger: #e03055;
+}
+
+/* Midnight — deep purple void */
+.theme-midnight {
+  --color-hx-bg: #0d0a1a;
+  --color-hx-panel: #130f24;
+  --color-hx-border: #2a2050;
+  --color-hx-neon: #a855f7;
+  --color-hx-neon-hover: #bf7aff;
+  --color-hx-purple: #e040fb;
+  --color-hx-text: #e0d8f8;
+  --color-hx-muted: #9480c8;
+  --color-hx-dim: #5a4d88;
+  --color-hx-success: #34d399;
+  --color-hx-warning: #fbbf24;
+  --color-hx-danger: #f87171;
+}
+
+/* Forest — calm deep green */
+.theme-forest {
+  --color-hx-bg: #080f0a;
+  --color-hx-panel: #0d1810;
+  --color-hx-border: #1a3020;
+  --color-hx-neon: #22c97a;
+  --color-hx-neon-hover: #4adda0;
+  --color-hx-purple: #6ee7b7;
+  --color-hx-text: #d0f0dc;
+  --color-hx-muted: #6aaa88;
+  --color-hx-dim: #3a6a50;
+  --color-hx-success: #22c97a;
+  --color-hx-warning: #d4aa00;
+  --color-hx-danger: #e05555;
+}
+
+/* Sunset — warm amber darkness */
+.theme-sunset {
+  --color-hx-bg: #120a06;
+  --color-hx-panel: #1e1008;
+  --color-hx-border: #3a2215;
+  --color-hx-neon: #f97316;
+  --color-hx-neon-hover: #fb923c;
+  --color-hx-purple: #e879f9;
+  --color-hx-text: #f0dcc8;
+  --color-hx-muted: #c08060;
+  --color-hx-dim: #7a4a30;
+  --color-hx-success: #4ade80;
+  --color-hx-warning: #fbbf24;
+  --color-hx-danger: #f87171;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI",
+    system-ui, Roboto, sans-serif;
+  background: var(--color-hx-bg);
+  color: var(--color-hx-text);
+}
+
+/* ── Angular clip shapes ──────────────────────────── */
+
+.hx-card {
+  position: relative;
+  clip-path: polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 0 100%);
+  transition: transform 0.15s ease;
+}
+.hx-card:hover {
+  transform: translateY(-2px);
+}
+
+.hx-clip-btn {
+  clip-path: polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 0 100%);
+}
+
+.hx-modal {
+  clip-path: polygon(0 0, calc(100% - 18px) 0, 100% 18px, 100% 100%, 0 100%);
+}
+
+.hx-input {
+  transition:
+    border-color 0.2s ease,
+    box-shadow 0.2s ease;
+  color: var(--color-hx-text);
+}
+.hx-input:focus {
+  border-color: rgba(0, 119, 204, 0.55) !important;
+  box-shadow:
+    0 0 10px rgba(0, 119, 204, 0.18),
+    inset 0 0 8px rgba(0, 119, 204, 0.04);
+}
+.dark .hx-input:focus {
+  border-color: rgba(0, 229, 255, 0.55) !important;
+  box-shadow:
+    0 0 10px rgba(0, 229, 255, 0.18),
+    inset 0 0 8px rgba(0, 229, 255, 0.04);
+}
+.hx-input::placeholder {
+  color: var(--color-hx-dim);
+}
+
+/* ── Scanline overlay on terminal ─────────────────── */
+
+.hx-scanlines {
+  position: relative;
+}
+.hx-scanlines::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 3px,
+    rgba(0, 229, 255, 0.006) 3px,
+    rgba(0, 229, 255, 0.006) 4px
+  );
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* xterm sits above scanlines, textarea must be reachable */
+.hx-scanlines .xterm {
+  position: relative;
+  z-index: 2;
+  width: 100% !important;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.xterm-screen,
+.xterm-screen canvas {
+  max-width: 100%;
+}
+.hx-scanlines .xterm-helper-textarea {
+  pointer-events: auto !important;
+  z-index: 3 !important;
+}
+
+/* ── Scrollbars ───────────────────────────────────── */
+
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-hx-border);
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-hx-dim);
+}
+
+/* Hide scrollbar completely for tab bar */
+.hx-tabbar::-webkit-scrollbar {
+  height: 0;
+  display: none;
+}
+.hx-tabbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Hide scrollbar for tab scroll container */
+.hx-hide-scrollbar::-webkit-scrollbar {
+  height: 0;
+  display: none;
+}
+.hx-hide-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* ── xterm overrides ─────────────────────────────── */
+
+.xterm,
+.xterm-viewport,
+.xterm-screen {
+  background: #000000 !important;
+}
+
+/* ── Tab bar ─────────────────────────────────────── */
+
+.hx-tabbar {
+  background: #141928;
+}
+
+/* Every tab (inactive default) */
+.hx-tab {
+  position: relative;
+  border-top: 2px solid transparent;
+  color: rgba(185, 200, 228, 0.85);
+  overflow: hidden;
+  justify-content: flex-start;
+  transition:
+    color 0.13s ease,
+    background 0.13s ease;
+}
+.hx-tab:hover {
+  color: #c8d4ea;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* Active SSH/terminal tab — white bg, black text */
+.hx-tab-term-active {
+  color: #000000 !important;
+  background: #ffffff !important;
+  z-index: 10;
+  position: relative;
+  margin-bottom: -1px;
+  border-left: 1px solid rgba(17, 24, 39, 0.08) !important;
+  border-right: 1px solid rgba(17, 24, 39, 0.08) !important;
+  border-bottom: none !important;
+}
+.hx-tab-term-active:hover {
+  background: #ffffff !important;
+  color: #000000 !important;
+}
+
+/* Active virtual tab (Overview / Settings / New Session) —
+   blends seamlessly into the light content area below */
+.hx-tab-virtual-active {
+  color: var(--color-hx-neon) !important;
+  background: var(--color-hx-bg) !important;
+  z-index: 10;
+  position: relative;
+  margin-bottom: -1px;
+  border-left: 1px solid var(--color-hx-border) !important;
+  border-right: 1px solid var(--color-hx-border) !important;
+  border-bottom: 1px solid var(--color-hx-bg) !important;
+}
+.hx-tab-virtual-active:hover {
+  background: var(--color-hx-bg) !important;
+  color: var(--color-hx-neon) !important;
+}

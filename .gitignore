@@ -1,0 +1,46 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+src-tauri/target/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Tauri
+src-tauri/WixTools/
+src-tauri/target/
+
+# Logs
+*.log
+
+# Personal / local data files — not for end users
+data/SolarPutty_sessions_decrypted.txt
+data/seed_localstorage.js
+data/atlas_sessions_import.json
+data/icon_source.png
+src-tauri/icons/icon_source.png
+npm-debug.log*
+
+# Local solar-putty imports (may contain credentials)
+src/solarPuttySessions.ts
+src/solarPuttyCredentials.ts
+
+# Data files (imported sessions - may contain sensitive info)
+data/atlas_sessions_import.json
+data/SolarPutty_sessions_decrypted.txt

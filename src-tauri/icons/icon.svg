@@ -1,0 +1,17 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <filter id="strongGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="10" result="blur1"/>
+      <feGaussianBlur stdDeviation="20" result="blur2"/>
+      <feGaussianBlur stdDeviation="35" result="blur3"/>
+      <feMerge>
+        <feMergeNode in="blur3"/>
+        <feMergeNode in="blur2"/>
+        <feMergeNode in="blur1"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <rect width="512" height="512" fill="#0A0C14"/>
+  <polygon points="256,80 432,256 256,432 80,256" fill="#00FFFF" filter="url(#strongGlow)"/>
+</svg>

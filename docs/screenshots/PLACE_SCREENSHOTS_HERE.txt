@@ -1,0 +1,9 @@
+Place your screenshots here. The README.md references the following files:
+
+- overview.png   → Session overview page (search bar, session cards with colors)
+- terminal.png   → Active terminal session (with quick commands bar at bottom)
+- split.png      → Split terminal view (two panes side by side or stacked)
+- settings.png   → Settings panel (sessions/credentials/scripts tabs)
+- sftp.png       → SFTP file transfer in progress (toast pill visible)
+
+Recommended resolution: 1400×900 or higher, PNG format.
