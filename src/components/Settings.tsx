@@ -1048,7 +1048,7 @@ export function Settings({
 
 // ── Updates Tab ───────────────────────────────────────────────────────────────
 
-const CURRENT_VERSION = "0.1.6";
+const CURRENT_VERSION = "0.1.7";
 const GITHUB_REPO = "aleynatila/atlas-shell";
 const RELEASES_URL = `https://github.com/${GITHUB_REPO}/releases`;
 
