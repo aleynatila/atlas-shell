@@ -7,7 +7,7 @@ use ssh2::{OpenFlags, OpenType, Session};
 use std::{
     collections::HashMap,
     io::{Read, Write},
-    net::TcpStream,
+    net::{SocketAddr, TcpStream, ToSocketAddrs},
     path::Path,
     sync::{mpsc, Mutex},
     thread,
@@ -59,10 +59,31 @@ fn start_ssh_session(
     let app = app_handle.clone();
     let session_id_clone = session_id.clone();
     thread::spawn(move || {
-        match TcpStream::connect(format!("{}:{}", host, port)) {
+        let addr_str = format!("{}:{}", host, port);
+        // Try parsing directly as IP:port first (avoids DNS for IP addresses)
+        let tcp_result = addr_str.parse::<SocketAddr>()
+            .map(|sock_addr| {
+                TcpStream::connect_timeout(&sock_addr, Duration::from_secs(10))
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap_or_else(|_| {
+                // Hostname: do DNS resolution then connect
+                addr_str.to_socket_addrs()
+                    .map_err(|e| e.to_string())
+                    .and_then(|mut addrs| {
+                        addrs.next().ok_or_else(|| "could not resolve host".to_string())
+                    })
+                    .and_then(|sock_addr| {
+                        TcpStream::connect_timeout(&sock_addr, Duration::from_secs(10))
+                            .map_err(|e| e.to_string())
+                    })
+            });
+        match tcp_result {
             Ok(tcp) => {
                 // session creation
                 if let Ok(mut sess) = Session::new() {
+                    // 15s timeout for all blocking SSH operations (handshake, auth, etc.)
+                    sess.set_timeout(15_000);
                     sess.set_tcp_stream(tcp);
                     if let Err(e) = sess.handshake() {
                         let _ = app.emit_all("ssh-output", SshOutput { session: session_id_clone.clone(), output: format!("handshake failed: {}", e) });
@@ -96,8 +117,11 @@ fn start_ssh_session(
                                     let r = rows.unwrap_or(24) as u32;
                                     let _ = channel.request_pty("xterm", None, Some((c, r, 0, 0)));
                                     let _ = channel.shell();
+                                    // Send SSH-level keepalive every 30s to prevent server-side idle drops
+                                    let _ = sess.set_keepalive(true, 30);
                                     sess.set_blocking(false);
-                                    let mut buf = [0u8; 4096];
+                                    let mut buf = [0u8; 32768];
+                                    let mut keepalive_timer = std::time::Instant::now();
                                     loop {
                                         match channel.read(&mut buf) {
                                             Ok(n) if n > 0 => {
@@ -127,10 +151,18 @@ fn start_ssh_session(
                                             Err(mpsc::TryRecvError::Empty) => {}
                                         }
 
+                                        // Send SSH keepalive every 25s (before server's 30s idle timeout)
+                                        if keepalive_timer.elapsed().as_secs() >= 25 {
+                                            sess.set_blocking(true);
+                                            let _ = sess.keepalive_send();
+                                            sess.set_blocking(false);
+                                            keepalive_timer = std::time::Instant::now();
+                                        }
+
                                         if channel.eof() {
                                             break;
                                         }
-                                        thread::sleep(Duration::from_millis(15));
+                                        thread::sleep(Duration::from_millis(5));
                                     }
                                 }
                                 Err(err) => {

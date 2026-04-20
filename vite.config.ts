@@ -6,4 +6,13 @@ export default defineConfig({
   server: {
     port: 5173,
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          xterm: ["xterm", "xterm-addon-fit", "xterm-addon-webgl"],
+        },
+      },
+    },
+  },
 });
