@@ -1339,7 +1339,7 @@ export function Settings({
 
 // ── Updates Tab ───────────────────────────────────────────────────────────────
 
-const CURRENT_VERSION = "0.2.2";
+const CURRENT_VERSION = "0.2.3";
 const RELEASES_URL = "https://github.com/aleynatila/atlas-shell/releases";
 
 interface UpdateInfo {
@@ -1458,26 +1458,36 @@ function UpdatesTab({
     setInstallStatus(null);
     try {
       const update = await checkUpdate();
-      const info: UpdateInfo =
-        update.shouldUpdate && update.manifest
-          ? {
-              version: normalizeVersion(update.manifest.version),
-              name: `v${normalizeVersion(update.manifest.version)}`,
-              body: update.manifest.body || "",
-              publishedAt: update.manifest.date || "",
-              htmlUrl: RELEASES_URL,
-              downloadUrl: null,
-            }
-          : {
-              version: currentVersion,
-              name: `v${currentVersion}`,
-              body: "",
-              publishedAt: "",
-              htmlUrl: RELEASES_URL,
-              downloadUrl: null,
-            };
+      const manifest = update.manifest as
+        | (typeof update.manifest & {
+            notes?: string;
+            pub_date?: string;
+          })
+        | undefined;
+      const manifestVersion = normalizeVersion(
+        manifest?.version || currentVersion,
+      );
+      const effectiveShouldUpdate =
+        compareVersions(manifestVersion, currentVersion) > 0;
+      const info: UpdateInfo = manifest
+        ? {
+            version: manifestVersion,
+            name: `v${manifestVersion}`,
+            body: manifest.body || manifest.notes || "",
+            publishedAt: normalizePublishedAt(manifest.date, manifest.pub_date),
+            htmlUrl: RELEASES_URL,
+            downloadUrl: null,
+          }
+        : {
+            version: currentVersion,
+            name: `v${currentVersion}`,
+            body: "",
+            publishedAt: "",
+            htmlUrl: RELEASES_URL,
+            downloadUrl: null,
+          };
 
-      setUpdateAvailable(update.shouldUpdate);
+      setUpdateAvailable(effectiveShouldUpdate);
       setLatestRelease(info);
 
       const now = new Date().toISOString();
@@ -1487,7 +1497,7 @@ function UpdatesTab({
         localStorage.setItem("atlas_latest_release", JSON.stringify(info));
         localStorage.setItem(
           "atlas_update_available",
-          JSON.stringify(update.shouldUpdate),
+          JSON.stringify(effectiveShouldUpdate),
         );
       } catch {}
     } catch (err) {
@@ -1537,8 +1547,16 @@ function UpdatesTab({
     }
   }, [latestRelease, updateAvailable]);
 
-  const isNewer = updateAvailable === true && latestRelease;
-  const isUpToDate = updateAvailable === false && latestRelease;
+  const versionComparison = latestRelease
+    ? compareVersions(latestRelease.version, currentVersion)
+    : null;
+  const isNewer =
+    !!latestRelease && versionComparison !== null && versionComparison > 0;
+  const isUpToDate =
+    !!latestRelease && versionComparison !== null && versionComparison <= 0;
+  const releaseDateLabel = latestRelease?.publishedAt
+    ? formatPublishedAt(latestRelease.publishedAt)
+    : null;
 
   return (
     <div>
@@ -1612,10 +1630,9 @@ function UpdatesTab({
                     — {latestRelease.name}
                   </span>
                 )}
-              {latestRelease.publishedAt && (
+              {releaseDateLabel && (
                 <p className="text-[10px] text-hx-dim font-mono mt-0.5">
-                  Released{" "}
-                  {new Date(latestRelease.publishedAt).toLocaleDateString()}
+                  Released {releaseDateLabel}
                 </p>
               )}
             </div>
@@ -1838,6 +1855,26 @@ function compareVersions(a: string, b: string): number {
 
 function normalizeVersion(version: string): string {
   return version.trim().replace(/^v/i, "").split("-")[0] ?? "";
+}
+
+function normalizePublishedAt(
+  ...candidates: Array<string | undefined>
+): string {
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const normalized = candidate.trim();
+    if (!normalized) continue;
+    if (!Number.isNaN(Date.parse(normalized))) {
+      return normalized;
+    }
+  }
+  return "";
+}
+
+function formatPublishedAt(value: string): string | null {
+  const parsed = Date.parse(value);
+  if (Number.isNaN(parsed)) return null;
+  return new Date(parsed).toLocaleDateString();
 }
 
 // ── Edit Session Sidebar (shared between Settings and Overview) ──
