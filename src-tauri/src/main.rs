@@ -86,7 +86,7 @@ fn start_ssh_session(
                     sess.set_timeout(15_000);
                     sess.set_tcp_stream(tcp);
                     if let Err(e) = sess.handshake() {
-                        let _ = app.emit_all("ssh-output", SshOutput { session: session_id_clone.clone(), output: format!("handshake failed: {}", e) });
+                        let _ = app.emit_all(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: format!("handshake failed: {}", e) });
                     } else {
                         let mut authed = false;
                         if let Some(kp) = key_path.clone() {
@@ -95,8 +95,8 @@ fn start_ssh_session(
                             match sess.userauth_pubkey_file(&user, None, pk, passphrase) {
                                 Ok(_) if sess.authenticated() => authed = true,
                                 Err(e) => {
-                                    let _ = app.emit_all("ssh-output", SshOutput { session: session_id_clone.clone(), output: format!("pubkey auth error: {}", e) });
-                                }
+                                                    let _ = app.emit_all(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: format!("pubkey auth error: {}", e) });
+                                                }
                                 _ => {}
                             }
                         }
@@ -104,8 +104,8 @@ fn start_ssh_session(
                             match sess.userauth_password(&user, &pass) {
                                 Ok(_) if sess.authenticated() => authed = true,
                                 Err(e) => {
-                                    let _ = app.emit_all("ssh-output", SshOutput { session: session_id_clone.clone(), output: format!("password auth error: {}", e) });
-                                }
+                                                    let _ = app.emit_all(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: format!("password auth error: {}", e) });
+                                                }
                                 _ => {}
                             }
                         }
@@ -123,12 +123,22 @@ fn start_ssh_session(
                                     let mut buf = [0u8; 32768];
                                     let mut keepalive_timer = std::time::Instant::now();
                                     loop {
-                                        match channel.read(&mut buf) {
-                                            Ok(n) if n > 0 => {
-                                                let s = String::from_utf8_lossy(&buf[..n]).to_string();
-                                                let _ = app.emit_all("ssh-output", SshOutput { session: session_id_clone.clone(), output: s });
+                                        // Coalesce consecutive reads into one IPC event to reduce
+                                        // frontend message overhead during high-throughput output.
+                                        let mut combined = String::new();
+                                        let mut got_data = false;
+                                        for _ in 0..8 {
+                                            match channel.read(&mut buf) {
+                                                Ok(n) if n > 0 => {
+                                                    got_data = true;
+                                                    combined.push_str(&String::from_utf8_lossy(&buf[..n]));
+                                                }
+                                                _ => break,
                                             }
-                                            _ => {}
+                                        }
+                                        if !combined.is_empty() {
+                                            let event_name = format!("ssh-output-{}", session_id_clone);
+                                            let _ = app.emit_all(event_name.as_str(), SshOutput { session: session_id_clone.clone(), output: combined });
                                         }
 
                                         match rx.try_recv() {
@@ -162,28 +172,31 @@ fn start_ssh_session(
                                         if channel.eof() {
                                             break;
                                         }
-                                        thread::sleep(Duration::from_millis(5));
+                                        // Adaptive sleep: skip delay when data is flowing to reduce latency
+                                        if !got_data {
+                                            thread::sleep(Duration::from_millis(5));
+                                        }
                                     }
                                 }
                                 Err(err) => {
-                                    let _ = app.emit_all("ssh-output", SshOutput { session: session_id_clone.clone(), output: format!("channel error: {}", err) });
+                                    let _ = app.emit_all(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: format!("channel error: {}", err) });
                                 }
                             }
                         } else {
-                            let _ = app.emit_all("ssh-output", SshOutput { session: session_id_clone.clone(), output: "authentication failed".into() });
+                            let _ = app.emit_all(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: "authentication failed".into() });
                         }
                     }
                 } else {
-                    let _ = app.emit_all("ssh-output", SshOutput { session: session_id_clone.clone(), output: "session init failed".into() });
+                    let _ = app.emit_all(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: "session init failed".into() });
                 }
             }
             Err(e) => {
-                let _ = app.emit_all("ssh-output", SshOutput { session: session_id_clone.clone(), output: format!("tcp connect failed: {}", e) });
+                let _ = app.emit_all(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: format!("tcp connect failed: {}", e) });
             }
         }
 
         SESS_TX.lock().unwrap().remove(&session_id_clone);
-        let _ = app.emit_all("ssh-output", SshOutput { session: session_id_clone.clone(), output: "[disconnected]".into() });
+        let _ = app.emit_all(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: "[disconnected]".into() });
     });
 
     Ok(session_id)

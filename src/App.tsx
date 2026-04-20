@@ -109,14 +109,14 @@ function App() {
         return {
           logPath: "",
           fontSize: 15,
-          fontFamily: "'Fira Code', Consolas, monospace",
+          fontFamily: "'Cascadia Mono', Consolas, monospace",
           theme: "light",
         };
       } catch {
         return {
           logPath: "",
           fontSize: 15,
-          fontFamily: "'Fira Code', Consolas, monospace",
+          fontFamily: "'Cascadia Mono', Consolas, monospace",
           theme: "light",
         };
       }
@@ -141,6 +141,12 @@ function App() {
   openViewsRef.current = openViews;
   const splitTabsRef = useRef(splitTabs);
   splitTabsRef.current = splitTabs;
+
+  // Debounce timers for localStorage/keychain writes
+  const saveSessionsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const saveCredsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Keychain migration + load ──
   useEffect(() => {
@@ -235,43 +241,50 @@ function App() {
   // ── Persistence helpers (stable — no state closures) ──
   const saveSessions = useCallback((list: SessionEntry[]) => {
     setSessions(list);
-    try {
-      localStorage.setItem(
-        "atlas_sessions",
-        JSON.stringify(list.map(({ pass: _p, ...rest }) => rest)),
-      );
-    } catch {}
-    list.forEach((s) => {
-      if (!s.credentialId) {
-        if (s.pass) {
-          invoke("set_credential", {
-            id: "sess_" + s.id,
-            password: s.pass,
-          }).catch(() => {});
-        } else {
-          invoke("delete_credential", { id: "sess_" + s.id }).catch(() => {});
+    if (saveSessionsTimerRef.current)
+      clearTimeout(saveSessionsTimerRef.current);
+    saveSessionsTimerRef.current = setTimeout(() => {
+      try {
+        localStorage.setItem(
+          "atlas_sessions",
+          JSON.stringify(list.map(({ pass: _p, ...rest }) => rest)),
+        );
+      } catch {}
+      list.forEach((s) => {
+        if (!s.credentialId) {
+          if (s.pass) {
+            invoke("set_credential", {
+              id: "sess_" + s.id,
+              password: s.pass,
+            }).catch(() => {});
+          } else {
+            invoke("delete_credential", { id: "sess_" + s.id }).catch(() => {});
+          }
         }
-      }
-    });
+      });
+    }, 400);
   }, []);
   const saveCredentials = useCallback((list: Credential[]) => {
     setCredentials(list);
-    try {
-      localStorage.setItem(
-        "atlas_credentials",
-        JSON.stringify(list.map(({ pass: _p, ...rest }) => rest)),
-      );
-    } catch {}
-    list.forEach((c) => {
-      if (c.pass) {
-        invoke("set_credential", {
-          id: "cred_" + c.id,
-          password: c.pass,
-        }).catch(() => {});
-      } else {
-        invoke("delete_credential", { id: "cred_" + c.id }).catch(() => {});
-      }
-    });
+    if (saveCredsTimerRef.current) clearTimeout(saveCredsTimerRef.current);
+    saveCredsTimerRef.current = setTimeout(() => {
+      try {
+        localStorage.setItem(
+          "atlas_credentials",
+          JSON.stringify(list.map(({ pass: _p, ...rest }) => rest)),
+        );
+      } catch {}
+      list.forEach((c) => {
+        if (c.pass) {
+          invoke("set_credential", {
+            id: "cred_" + c.id,
+            password: c.pass,
+          }).catch(() => {});
+        } else {
+          invoke("delete_credential", { id: "cred_" + c.id }).catch(() => {});
+        }
+      });
+    }, 400);
   }, []);
   const saveTags = useCallback((list: import("./types").Tag[]) => {
     setTags(list);

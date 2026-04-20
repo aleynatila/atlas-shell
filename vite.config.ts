@@ -11,8 +11,12 @@ export default defineConfig({
       output: {
         manualChunks: {
           xterm: ["xterm", "xterm-addon-fit", "xterm-addon-webgl"],
+          lucide: ["lucide-react"],
         },
       },
+    },
+    commonjsOptions: {
+      include: [/react-window/, /node_modules/],
     },
   },
 });

@@ -132,12 +132,12 @@ export const Overview = memo(function Overview({
               </div>
               <div className="absolute -inset-3 border border-hx-neon/10 rotate-45" />
             </div>
-            <p className="text-hx-muted text-sm">Kayıtlı oturum yok</p>
+            <p className="text-hx-muted text-sm">No sessions saved</p>
             <button
               onClick={() => openView("new-session")}
               className="text-xs text-hx-neon hover:underline font-mono tracking-wider"
             >
-              + İlk oturumu oluştur
+              + Create your first session
             </button>
           </div>
         ) : (

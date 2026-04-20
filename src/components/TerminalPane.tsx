@@ -48,6 +48,7 @@ export const TerminalPane = memo(function TerminalPane({
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const webglRef = useRef<WebglAddon | null>(null);
   const unlistenRef = useRef<UnlistenFn | null>(null);
   const sshIdRef = useRef<string | null>(pane.sshSessionId);
   const visibleRef = useRef(visible);
@@ -70,53 +71,55 @@ export const TerminalPane = memo(function TerminalPane({
   // Listen to Tauri file-drop events only when this pane is visible
   useEffect(() => {
     if (!visible) return;
-    let unlistenDrop: UnlistenFn | null = null;
-    let unlistenHover: UnlistenFn | null = null;
-    let unlistenCancel: UnlistenFn | null = null;
-    listen("tauri://file-drop", (e) => {
-      setDragOver(false);
-      const paths = e.payload as string[];
-      if (paths && paths.length > 0) {
-        const sid = sshIdRef.current;
-        if (sid) {
-          waitingForPwdRef.current = true;
-          pwdResponseRef.current = "";
-          invoke("send_ssh_input", { sessionId: sid, input: "pwd\n" });
-          setTimeout(() => {
-            setSftpRemoteDir(currentCwdRef.current || "~");
+    const unlisteners: Array<() => void> = [];
+    let mounted = true;
+
+    Promise.all([
+      listen("tauri://file-drop", (e) => {
+        setDragOver(false);
+        const paths = e.payload as string[];
+        if (paths && paths.length > 0) {
+          const sid = sshIdRef.current;
+          if (sid) {
+            waitingForPwdRef.current = true;
+            pwdResponseRef.current = "";
+            invoke("send_ssh_input", { sessionId: sid, input: "pwd\n" });
+            setTimeout(() => {
+              setSftpRemoteDir(currentCwdRef.current || "~");
+              setSftpFiles(paths);
+              waitingForPwdRef.current = false;
+            }, 500);
+          } else {
+            setSftpRemoteDir("~");
             setSftpFiles(paths);
-            waitingForPwdRef.current = false;
-          }, 500);
-        } else {
-          setSftpRemoteDir("~");
-          setSftpFiles(paths);
+          }
         }
+      }),
+      listen("tauri://file-drop-hover", () => {
+        if ((window as any).__tabDragging) return;
+        setDragOver(true);
+      }),
+      listen("tauri://file-drop-cancelled", () => setDragOver(false)),
+    ]).then((fns) => {
+      if (mounted) {
+        unlisteners.push(...fns);
+      } else {
+        fns.forEach((u) => u());
       }
-    }).then((u) => {
-      unlistenDrop = u;
     });
-    listen("tauri://file-drop-hover", () => {
-      if ((window as any).__tabDragging) return;
-      setDragOver(true);
-    }).then((u) => {
-      unlistenHover = u;
-    });
-    listen("tauri://file-drop-cancelled", () => setDragOver(false)).then(
-      (u) => {
-        unlistenCancel = u;
-      },
-    );
+
     return () => {
-      unlistenDrop?.();
-      unlistenHover?.();
-      unlistenCancel?.();
+      mounted = false;
+      unlisteners.forEach((u) => u());
     };
   }, [visible]);
 
   // Listen to sftp-progress events
   useEffect(() => {
     if (!visible) return;
-    let unlisten: UnlistenFn | null = null;
+    const unlisteners: Array<() => void> = [];
+    let mounted = true;
+
     listen("sftp-progress", (e) => {
       const p = e.payload as {
         id: string;
@@ -146,10 +149,13 @@ export const TerminalPane = memo(function TerminalPane({
         },
       }));
     }).then((u) => {
-      unlisten = u;
+      if (mounted) unlisteners.push(u);
+      else u();
     });
+
     return () => {
-      unlisten?.();
+      mounted = false;
+      unlisteners.forEach((u) => u());
     };
   }, [visible]);
 
@@ -201,10 +207,13 @@ export const TerminalPane = memo(function TerminalPane({
       const webgl = new WebglAddon();
       webgl.onContextLoss(() => {
         webgl.dispose();
+        webglRef.current = null;
       });
       term.loadAddon(webgl);
+      webglRef.current = webgl;
     } catch (_) {
       // WebGL not available — canvas renderer is used automatically
+      webglRef.current = null;
     }
 
     setTimeout(() => {
@@ -341,20 +350,25 @@ export const TerminalPane = memo(function TerminalPane({
       if (!sid) return;
       invoke("send_ssh_input", { sessionId: sid, input: data }).catch(() => {});
     });
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
     const handleResize = () => {
       if (!visibleRef.current) return; // skip resize work for hidden panes
-      requestAnimationFrame(() => {
-        try {
-          fitRef.current?.fit();
-        } catch (_) {}
-        const sid = sshIdRef.current;
-        if (!sid) return;
-        invoke("resize_pty", {
-          sessionId: sid,
-          cols: term.cols,
-          rows: term.rows,
-        }).catch(() => {});
-      });
+      if (resizeTimer !== null) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        resizeTimer = null;
+        requestAnimationFrame(() => {
+          try {
+            fitRef.current?.fit();
+          } catch (_) {}
+          const sid = sshIdRef.current;
+          if (!sid) return;
+          invoke("resize_pty", {
+            sessionId: sid,
+            cols: term.cols,
+            rows: term.rows,
+          }).catch(() => {});
+        });
+      }, 80);
     };
     const handlePaste = (e: ClipboardEvent) => {
       const text = e.clipboardData?.getData("text");
@@ -386,6 +400,7 @@ export const TerminalPane = memo(function TerminalPane({
     }
 
     return () => {
+      if (resizeTimer !== null) clearTimeout(resizeTimer);
       onData.dispose();
       onSelection.dispose();
       resizeObserver.disconnect();
@@ -437,7 +452,7 @@ export const TerminalPane = memo(function TerminalPane({
       const connectPass =
         overridePass || pane.sessionEntry.pass || password || "";
       term.write(
-        `\x1b[36m◆ Baglaniliyor: ${connectUser}@${pane.sessionEntry.host}:${pane.sessionEntry.port}...\x1b[0m\r\n`,
+        `\x1b[36m◆ Connecting: ${connectUser}@${pane.sessionEntry.host}:${pane.sessionEntry.port}...\x1b[0m\r\n`,
       );
       invoke("start_ssh_session", {
         host: pane.sessionEntry.host,
@@ -454,33 +469,31 @@ export const TerminalPane = memo(function TerminalPane({
           sshIdRef.current = sshId;
           setConnecting(false);
           onConnected(pane.tabId, sshId);
-          listen("ssh-output", (event) => {
+          listen(`ssh-output-${sshId}`, (event) => {
             const payload = event.payload as SshOutputPayload;
-            if (payload.session === sshId) {
-              if (waitingForPwdRef.current) {
-                pwdResponseRef.current += payload.output;
-                const lines = pwdResponseRef.current.split(/[\r\n]+/);
-                for (const line of lines) {
-                  const trimmed = line.trim();
-                  if (
-                    (trimmed.startsWith("/") || trimmed.startsWith("~")) &&
-                    trimmed.length > 0 &&
-                    !trimmed.includes("$") &&
-                    !trimmed.includes("#") &&
-                    !trimmed.includes(">") &&
-                    !trimmed.includes("%") &&
-                    !trimmed.startsWith("pwd")
-                  ) {
-                    currentCwdRef.current = trimmed;
-                    setCurrentCwd(trimmed);
-                    waitingForPwdRef.current = false;
-                    pwdResponseRef.current = "";
-                    break;
-                  }
+            if (waitingForPwdRef.current) {
+              pwdResponseRef.current += payload.output;
+              const lines = pwdResponseRef.current.split(/[\r\n]+/);
+              for (const line of lines) {
+                const trimmed = line.trim();
+                if (
+                  (trimmed.startsWith("/") || trimmed.startsWith("~")) &&
+                  trimmed.length > 0 &&
+                  !trimmed.includes("$") &&
+                  !trimmed.includes("#") &&
+                  !trimmed.includes(">") &&
+                  !trimmed.includes("%") &&
+                  !trimmed.startsWith("pwd")
+                ) {
+                  currentCwdRef.current = trimmed;
+                  setCurrentCwd(trimmed);
+                  waitingForPwdRef.current = false;
+                  pwdResponseRef.current = "";
+                  break;
                 }
-              } else {
-                term.write(payload.output);
               }
+            } else {
+              term.write(payload.output);
             }
           }).then((u) => {
             unlistenRef.current = u;
@@ -488,7 +501,7 @@ export const TerminalPane = memo(function TerminalPane({
         })
         .catch((err) => {
           setConnecting(false);
-          term.write(`\r\n\x1b[31m✖ Hata: ${String(err)}\x1b[0m\r\n`);
+          term.write(`\r\n\x1b[31m✖ Error: ${String(err)}\x1b[0m\r\n`);
           if (overridePass !== undefined) {
             term.write(`\r\nlogin as: `);
             promptRef.current = { stage: "user", user: "", pass: "" };
@@ -559,9 +572,17 @@ export const TerminalPane = memo(function TerminalPane({
     }
     if (changed) {
       try {
-        // refresh() forces xterm to re-render with the new font metrics
-        term.refresh(0, term.rows - 1);
+        // Clear the WebGL texture atlas so it is rebuilt with the new font metrics.
+        // Without this, the cached glyph bitmaps stay at the old size and the
+        // terminal looks garbled after a font size change.
+        const wgl = webglRef.current as any;
+        if (wgl) {
+          wgl.clearTextureAtlas?.();
+        }
+        // fit() recalculates cols/rows based on new cell dimensions and issues
+        // a proper resize — this must come before refresh().
         fitRef.current?.fit();
+        term.refresh(0, term.rows - 1);
       } catch (_) {}
     }
   }, [fontSize, fontFamily]);

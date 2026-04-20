@@ -11,7 +11,7 @@ import {
     Trash2,
     X,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useState } from "react";
 import { THEMES } from "../themes";
 import {
     adaptColor,
@@ -794,9 +794,7 @@ export function Settings({
                 <label className="block text-[10px] font-mono uppercase tracking-widest text-hx-neon/60 mb-1.5">
                   Terminal Font Family
                 </label>
-                <input
-                  type="text"
-                  placeholder="'Fira Code', Consolas, monospace"
+                <select
                   value={generalDraft.fontFamily}
                   onChange={(e) =>
                     setGeneralDraft((d) => ({
@@ -805,7 +803,15 @@ export function Settings({
                     }))
                   }
                   className="hx-input w-full bg-hx-bg border border-hx-border px-3 py-2 text-xs font-mono"
-                />
+                >
+                  <option value="'Cascadia Mono', Consolas, monospace">Cascadia Mono (Regular)</option>
+                  <option value="'Cascadia Code', Consolas, monospace">Cascadia Code</option>
+                  <option value="'Fira Code', Consolas, monospace">Fira Code</option>
+                  <option value="'JetBrains Mono', Consolas, monospace">JetBrains Mono</option>
+                  <option value="'Source Code Pro', Consolas, monospace">Source Code Pro</option>
+                  <option value="Consolas, monospace">Consolas</option>
+                  <option value="'Courier New', monospace">Courier New</option>
+                </select>
               </div>
               {/* Save button */}
               <div className="flex items-center gap-3 pt-1">
@@ -1071,6 +1077,8 @@ function UpdatesTab({
   const [checking, setChecking] = useState(false);
   const [latestRelease, setLatestRelease] = useState<UpdateInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [installing, setInstalling] = useState(false);
+  const [installStatus, setInstallStatus] = useState<string | null>(null);
   const [lastChecked, setLastChecked] = useState<string | null>(() => {
     try {
       return localStorage.getItem("atlas_last_update_check");
@@ -1080,6 +1088,42 @@ function UpdatesTab({
   });
 
   const autoCheck = generalSettings.autoCheckUpdates ?? true;
+
+  const downloadAndInstall = useCallback(async () => {
+    if (!latestRelease) return;
+    const url = latestRelease.downloadUrl;
+    if (!url) {
+      shellOpen(latestRelease.htmlUrl);
+      return;
+    }
+    setInstalling(true);
+    setInstallStatus("Downloading installer...");
+    setError(null);
+    try {
+      const { Command } = await import("@tauri-apps/api/shell");
+      // Download to %TEMP% then launch installer; PS exits after Start-Process returns
+      const ps = `$dest = "$env:TEMP\\atlas-update.exe"; (New-Object Net.WebClient).DownloadFile('${url}', $dest); Start-Process $dest`;
+      const result = await new Command("powershell", [
+        "-NoProfile",
+        "-Command",
+        ps,
+      ]).execute();
+      if (result.code !== 0) {
+        throw new Error(
+          result.stderr || "PowerShell exited with code " + result.code,
+        );
+      }
+      setInstallStatus("Installer launched — closing app...");
+      setTimeout(async () => {
+        const { exit } = await import("@tauri-apps/api/process");
+        await exit(0);
+      }, 1200);
+    } catch (err) {
+      setError(`Update failed: ${String(err)}`);
+      setInstalling(false);
+      setInstallStatus(null);
+    }
+  }, [latestRelease]);
 
   const checkForUpdates = useCallback(async () => {
     setChecking(true);
@@ -1321,7 +1365,7 @@ function UpdatesTab({
         <div className="flex gap-2">
           <button
             onClick={checkForUpdates}
-            disabled={checking}
+            disabled={checking || installing}
             className={`flex-1 py-2.5 text-[10px] font-bold uppercase tracking-widest hx-clip-btn transition-all flex items-center justify-center gap-1.5 ${checking ? "opacity-40 cursor-wait" : ""}`}
             style={{
               background: "linear-gradient(135deg,#00E5FF22,#00E5FF0a)",
@@ -1335,21 +1379,38 @@ function UpdatesTab({
 
           {isNewer && latestRelease && (
             <button
-              onClick={() => {
-                const url = latestRelease.downloadUrl || latestRelease.htmlUrl;
-                shellOpen(url);
-              }}
-              className="flex-1 py-2.5 text-[10px] font-bold uppercase tracking-widest hx-clip-btn transition-all flex items-center justify-center gap-1.5"
+              onClick={downloadAndInstall}
+              disabled={installing}
+              className={`flex-1 py-2.5 text-[10px] font-bold uppercase tracking-widest hx-clip-btn transition-all flex items-center justify-center gap-1.5 ${installing ? "opacity-60 cursor-wait" : ""}`}
               style={{
                 background: "linear-gradient(135deg,#00FF8822,#00FF880a)",
                 border: "1px solid #00FF8855",
                 color: "#00FF88",
               }}
             >
-              <Download size={10} />◆ Download Update
+              {installing ? (
+                <>
+                  <RefreshCw size={10} className="animate-spin" />
+                  {installStatus ?? "Updating..."}
+                </>
+              ) : (
+                <>
+                  <Download size={10} />◆ Update to v{latestRelease.version}
+                </>
+              )}
             </button>
           )}
         </div>
+
+        {/* Status messages */}
+        {installStatus && !error && (
+          <p className="text-[10px] text-hx-success font-mono">
+            {installStatus}
+          </p>
+        )}
+        {error && (
+          <p className="text-[10px] text-hx-danger font-mono">{error}</p>
+        )}
 
         {/* GitHub link */}
         <button
@@ -1410,7 +1471,7 @@ interface EditSessionSidebarProps {
   darkMode: boolean;
 }
 
-export function EditSessionSidebar({
+export const EditSessionSidebar = memo(function EditSessionSidebar({
   editingSession,
   setEditingSession,
   editForm,
@@ -1578,4 +1639,4 @@ export function EditSessionSidebar({
       </div>
     </div>
   );
-}
+});
