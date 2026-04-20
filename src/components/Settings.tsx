@@ -986,7 +986,15 @@ export function Settings({
                     <div className="flex gap-2">
                       <button
                         onClick={() => {
-                          // Fonksiyonlarınız...
+                          closeAllTerminals();
+                          saveGeneral({
+                            ...generalSettings,
+                            fontSize: appearanceDraft.fontSize,
+                            fontFamily: appearanceDraft.fontFamily,
+                          });
+                          setShowCloseWarning(false);
+                          setAppearanceSaved(true);
+                          setTimeout(() => setAppearanceSaved(false), 2500);
                         }}
                         className="px-4 py-1.5 text-[10px] font-bold uppercase tracking-widest hx-clip-btn transition-all hover:bg-orange-500/20"
                         style={{
