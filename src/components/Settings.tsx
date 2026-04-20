@@ -1,27 +1,27 @@
 import { open as shellOpen } from "@tauri-apps/api/shell";
 import {
-    Download,
-    Edit2,
-    ExternalLink,
-    FolderOpen,
-    Info,
-    Key,
-    Play,
-    RefreshCw,
-    Trash2,
-    X,
+  Download,
+  Edit2,
+  ExternalLink,
+  FolderOpen,
+  Info,
+  Key,
+  Play,
+  RefreshCw,
+  Trash2,
+  X,
 } from "lucide-react";
 import { memo, useCallback, useEffect, useState } from "react";
 import { THEMES } from "../themes";
 import {
-    adaptColor,
-    COLOR_PAIRS,
-    NEON_COLORS,
-    type Credential,
-    type GeneralSettings,
-    type Script,
-    type SessionEntry,
-    type Tag,
+  adaptColor,
+  COLOR_PAIRS,
+  NEON_COLORS,
+  type Credential,
+  type GeneralSettings,
+  type Script,
+  type SessionEntry,
+  type Tag,
 } from "../types";
 
 interface SettingsProps {
@@ -66,6 +66,28 @@ interface SettingsProps {
   importStatus: string | null;
   setImportStatus: (s: string | null) => void;
   darkMode: boolean;
+  closeAllTerminals: () => void;
+  settingsTab:
+    | "sessions"
+    | "credentials"
+    | "tags"
+    | "scripts"
+    | "general"
+    | "updates"
+    | "about"
+    | "appearance";
+  setSettingsTab: React.Dispatch<
+    React.SetStateAction<
+      | "sessions"
+      | "credentials"
+      | "tags"
+      | "scripts"
+      | "general"
+      | "updates"
+      | "about"
+      | "appearance"
+    >
+  >;
 }
 
 export function Settings({
@@ -90,26 +112,27 @@ export function Settings({
   importStatus,
   setImportStatus,
   darkMode,
+  settingsTab,
+  setSettingsTab,
+  closeAllTerminals,
 }: SettingsProps) {
   // ── Settings-local state ──
-  const [settingsTab, setSettingsTab] = useState<
-    | "sessions"
-    | "credentials"
-    | "tags"
-    | "scripts"
-    | "general"
-    | "updates"
-    | "about"
-  >("sessions");
+  // settingsTab is now lifted to App.tsx so it persists when navigating away
   const [settingsSearch, setSettingsSearch] = useState("");
 
   // Draft state for General tab — saved explicitly via Save button
   const [generalDraft, setGeneralDraft] = useState({
     logPath: generalSettings.logPath,
+  });
+  const [generalSaved, setGeneralSaved] = useState(false);
+
+  // Draft state for Appearance tab
+  const [appearanceDraft, setAppearanceDraft] = useState({
     fontSize: generalSettings.fontSize,
     fontFamily: generalSettings.fontFamily,
   });
-  const [generalSaved, setGeneralSaved] = useState(false);
+  const [appearanceSaved, setAppearanceSaved] = useState(false);
+  const [showCloseWarning, setShowCloseWarning] = useState(false);
 
   // Credential form
   const [credForm, setCredForm] = useState({
@@ -261,6 +284,7 @@ export function Settings({
             "credentials",
             "tags",
             "scripts",
+            "appearance",
             "general",
             "updates",
             "about",
@@ -751,6 +775,254 @@ export function Settings({
           </div>
         )}
 
+        {/* ── Appearance tab ── */}
+        {settingsTab === "appearance" && (
+          <div>
+            <h2 className="text-xs font-black uppercase tracking-[0.2em] text-hx-neon mb-4">
+              Appearance
+            </h2>
+
+            {/* Warning banner */}
+            <div
+              className="mb-4 flex items-start gap-2 px-4 py-3 max-w-lg rounded-md"
+              style={{ background: "#0f172a", border: "1px solid #334155" }}
+            >
+              <span
+                className="text-sm leading-none mt-0.5 shrink-0"
+                style={{ color: "#fb923c" }}
+              >
+                ⚠
+              </span>
+              <p
+                className="text-[10px] font-mono leading-relaxed"
+                style={{ color: "#cbd5e1" }}
+              >
+                Changing font settings will{" "}
+                <strong style={{ color: "#fb923c" }}>
+                  close all open terminals
+                </strong>
+                . Unsaved session output will be lost. Apply changes only when
+                you're ready.
+              </p>
+            </div>
+            <div className="bg-hx-panel border border-hx-border p-5 space-y-6 max-w-lg">
+              {/* Font Family */}
+              <div className="space-y-2">
+                <label className="block text-[10px] font-mono uppercase tracking-widest text-hx-neon/60">
+                  Terminal Font Family
+                </label>
+                <select
+                  value={appearanceDraft.fontFamily}
+                  onChange={(e) =>
+                    setAppearanceDraft((d) => ({
+                      ...d,
+                      fontFamily: e.target.value,
+                    }))
+                  }
+                  className="hx-input w-full bg-hx-bg border border-hx-border px-3 py-2 text-xs font-mono"
+                >
+                  <optgroup label="── Recommended ──">
+                    <option value="'Cascadia Mono', Consolas, monospace">
+                      Cascadia Mono
+                    </option>
+                    <option value="'Cascadia Code', Consolas, monospace">
+                      Cascadia Code (ligatures)
+                    </option>
+                    <option value="'Fira Code', Consolas, monospace">
+                      Fira Code (ligatures)
+                    </option>
+                    <option value="'JetBrains Mono', Consolas, monospace">
+                      JetBrains Mono
+                    </option>
+                    <option value="'Source Code Pro', Consolas, monospace">
+                      Source Code Pro
+                    </option>
+                    <option value="'Hack', Consolas, monospace">Hack</option>
+                    <option value="'Inconsolata', Consolas, monospace">
+                      Inconsolata
+                    </option>
+                    <option value="'Ubuntu Mono', Consolas, monospace">
+                      Ubuntu Mono
+                    </option>
+                    <option value="'Roboto Mono', Consolas, monospace">
+                      Roboto Mono
+                    </option>
+                    <option value="'IBM Plex Mono', Consolas, monospace">
+                      IBM Plex Mono
+                    </option>
+                    <option value="'Iosevka', Consolas, monospace">
+                      Iosevka
+                    </option>
+                  </optgroup>
+                  <optgroup label="── System Fonts ──">
+                    <option value="Consolas, monospace">Consolas</option>
+                    <option value="'Lucida Console', monospace">
+                      Lucida Console
+                    </option>
+                    <option value="'Courier New', monospace">
+                      Courier New
+                    </option>
+                    <option value="Menlo, monospace">Menlo</option>
+                    <option value="Monaco, monospace">Monaco</option>
+                    <option value="'DejaVu Sans Mono', monospace">
+                      DejaVu Sans Mono
+                    </option>
+                  </optgroup>
+                </select>
+
+                {/* Font Preview */}
+                <div className="border border-hx-border bg-hx-bg p-4 space-y-2">
+                  <p className="text-[9px] font-mono uppercase tracking-widest text-hx-dim mb-2">
+                    Preview
+                  </p>
+                  <div
+                    style={{
+                      fontFamily: appearanceDraft.fontFamily,
+                      fontSize: appearanceDraft.fontSize,
+                    }}
+                    className="text-hx-text leading-relaxed"
+                  >
+                    <div>atlas-shell v0.1.9 — SSH Client</div>
+                    <div className="text-hx-neon">
+                      root@server:~$ ls -la /var/log/
+                    </div>
+                    <div className="text-hx-muted">
+                      drwxr-xr-x 2 root root 4096 Apr 20 12:34 nginx/
+                    </div>
+                    <div className="text-hx-muted">
+                      -rw-r--r-- 1 root root 8192 Apr 20 12:34 syslog
+                    </div>
+                    <div className="text-hx-success">
+                      ✓ Connected to 192.168.1.1 · latency 12ms
+                    </div>
+                    <div className="text-hx-danger">
+                      ✗ Connection refused: port 22 not reachable
+                    </div>
+                    <div className="text-hx-dim">
+                      AaBbCcDd EeFfGgHh IiJjKk 0123456789 !@#$%^&*()
+                    </div>
+                    <div className="text-hx-dim">
+                      {"[ ] { } < > /\\ | - _ = + ; : \" ' ` ~ , . ?"}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Font Size */}
+              <div className="space-y-2">
+                <label className="block text-[10px] font-mono uppercase tracking-widest text-hx-neon/60">
+                  Terminal Font Size
+                </label>
+                <div className="flex items-center gap-4">
+                  <input
+                    type="range"
+                    min={8}
+                    max={28}
+                    step={1}
+                    value={appearanceDraft.fontSize}
+                    onChange={(e) =>
+                      setAppearanceDraft((d) => ({
+                        ...d,
+                        fontSize: Number(e.target.value),
+                      }))
+                    }
+                    className="flex-1 accent-hx-neon"
+                  />
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() =>
+                        setAppearanceDraft((d) => ({
+                          ...d,
+                          fontSize: Math.max(8, d.fontSize - 1),
+                        }))
+                      }
+                      className="w-7 h-7 border border-hx-border text-hx-dim hover:text-hx-text hover:border-hx-neon/40 text-sm leading-none flex items-center justify-center transition-colors"
+                    >
+                      −
+                    </button>
+                    <span className="text-sm font-mono text-hx-text w-8 text-center">
+                      {appearanceDraft.fontSize}
+                    </span>
+                    <button
+                      onClick={() =>
+                        setAppearanceDraft((d) => ({
+                          ...d,
+                          fontSize: Math.min(28, d.fontSize + 1),
+                        }))
+                      }
+                      className="w-7 h-7 border border-hx-border text-hx-dim hover:text-hx-text hover:border-hx-neon/40 text-sm leading-none flex items-center justify-center transition-colors"
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+                <div className="flex justify-between text-[9px] font-mono text-hx-dim px-0.5">
+                  <span>8px</span>
+                  <span>14px</span>
+                  <span>20px</span>
+                  <span>28px</span>
+                </div>
+              </div>
+
+              {/* Apply button */}
+              <div className="pt-1 border-t border-hx-border space-y-3">
+                {!showCloseWarning ? (
+                  <button
+                    onClick={() => setShowCloseWarning(true)}
+                    className="px-4 py-2 text-[10px] font-bold uppercase tracking-widest hx-clip-btn transition-all"
+                    style={{
+                      background: "linear-gradient(135deg,#00E5FF22,#00E5FF0a)",
+                      border: "1px solid #00E5FF55",
+                      color: "#00E5FF",
+                    }}
+                  >
+                    Apply Appearance Settings
+                  </button>
+                ) : (
+                  <div className="space-y-2">
+                    <p className="text-[10px] font-mono text-orange-400">
+                      This will close all open terminals. Continue?
+                    </p>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => {
+                          // Fonksiyonlarınız...
+                        }}
+                        className="px-4 py-1.5 text-[10px] font-bold uppercase tracking-widest hx-clip-btn transition-all hover:bg-orange-500/20"
+                        style={{
+                          background:
+                            "linear-gradient(135deg, #ea580c22, #ea580c0a)", // Şeffaf turuncu
+                          border: "1px solid #ea580c", // Belirgin turuncu kenarlık
+                          color: "#fdba74", // Açık turuncu
+                        }}
+                      >
+                        Yes, close &amp; apply
+                      </button>
+                      <button
+                        onClick={() => setShowCloseWarning(false)}
+                        className="px-4 py-1.5 text-[10px] font-bold uppercase tracking-widest hx-clip-btn transition-all hover:bg-slate-700"
+                        style={{
+                          background:
+                            "linear-gradient(135deg, #33415544, #1e293b44)", // Yarı şeffaf lacivert/gri
+                          border: "1px solid #475569",
+                          color: "#94a3b8", // Soluk mavi-gri
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {appearanceSaved && (
+                  <p className="text-[10px] font-mono text-hx-success">
+                    ✓ Appearance settings applied
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* ── General tab ── */}
         {settingsTab === "general" && (
           <div>
@@ -772,47 +1044,6 @@ export function Settings({
                   className="hx-input w-full bg-hx-bg border border-hx-border px-3 py-2 text-xs font-mono"
                 />
               </div>
-              <div>
-                <label className="block text-[10px] font-mono uppercase tracking-widest text-hx-neon/60 mb-1.5">
-                  Terminal Font Size
-                </label>
-                <input
-                  type="number"
-                  min={8}
-                  max={32}
-                  value={generalDraft.fontSize}
-                  onChange={(e) =>
-                    setGeneralDraft((d) => ({
-                      ...d,
-                      fontSize: Number(e.target.value),
-                    }))
-                  }
-                  className="hx-input w-24 bg-hx-bg border border-hx-border px-3 py-2 text-xs font-mono"
-                />
-              </div>
-              <div>
-                <label className="block text-[10px] font-mono uppercase tracking-widest text-hx-neon/60 mb-1.5">
-                  Terminal Font Family
-                </label>
-                <select
-                  value={generalDraft.fontFamily}
-                  onChange={(e) =>
-                    setGeneralDraft((d) => ({
-                      ...d,
-                      fontFamily: e.target.value,
-                    }))
-                  }
-                  className="hx-input w-full bg-hx-bg border border-hx-border px-3 py-2 text-xs font-mono"
-                >
-                  <option value="'Cascadia Mono', Consolas, monospace">Cascadia Mono (Regular)</option>
-                  <option value="'Cascadia Code', Consolas, monospace">Cascadia Code</option>
-                  <option value="'Fira Code', Consolas, monospace">Fira Code</option>
-                  <option value="'JetBrains Mono', Consolas, monospace">JetBrains Mono</option>
-                  <option value="'Source Code Pro', Consolas, monospace">Source Code Pro</option>
-                  <option value="Consolas, monospace">Consolas</option>
-                  <option value="'Courier New', monospace">Courier New</option>
-                </select>
-              </div>
               {/* Save button */}
               <div className="flex items-center gap-3 pt-1">
                 <button
@@ -820,8 +1051,6 @@ export function Settings({
                     saveGeneral({
                       ...generalSettings,
                       logPath: generalDraft.logPath,
-                      fontSize: generalDraft.fontSize,
-                      fontFamily: generalDraft.fontFamily,
                     });
                     setGeneralSaved(true);
                     setTimeout(() => setGeneralSaved(false), 2000);
@@ -837,11 +1066,18 @@ export function Settings({
                     color: generalSaved ? "#00FF88" : "#00E5FF",
                   }}
                 >
-                  {generalSaved ? "✓ Saved" : "Save Font Settings"}
+                  {generalSaved ? "✓ Saved" : "Save Settings"}
                 </button>
               </div>
               <p className="text-[10px] text-hx-dim font-mono">
-                Font changes apply immediately to all open terminals.
+                Font and appearance settings have moved to the{" "}
+                <button
+                  onClick={() => setSettingsTab("appearance")}
+                  className="text-hx-neon hover:underline cursor-pointer"
+                >
+                  Appearance
+                </button>{" "}
+                tab.
               </p>
               {/* Theme picker */}
               <div className="pt-2 border-t border-hx-border space-y-2">

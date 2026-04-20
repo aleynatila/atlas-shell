@@ -412,6 +412,12 @@ fn delete_credential(id: String) -> Result<(), String> {
     }
 }
 
+#[tauri::command]
+fn debug_log(message: String) -> Result<(), String> {
+    println!("{}", message);
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
     .invoke_handler(tauri::generate_handler![
@@ -423,6 +429,7 @@ fn main() {
         set_credential,
         get_credential,
         delete_credential,
+        debug_log,
     ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

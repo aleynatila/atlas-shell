@@ -1,6 +1,6 @@
 import {
-    readText as clipboardRead,
-    writeText as clipboardWrite,
+  readText as clipboardRead,
+  writeText as clipboardWrite,
 } from "@tauri-apps/api/clipboard";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/tauri";
@@ -49,10 +49,14 @@ export const TerminalPane = memo(function TerminalPane({
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const webglRef = useRef<WebglAddon | null>(null);
+  // Set to true when WebGL context is lost so we can attempt recovery on next visible
+  const webglLostRef = useRef(false);
   const unlistenRef = useRef<UnlistenFn | null>(null);
   const sshIdRef = useRef<string | null>(pane.sshSessionId);
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
+  // Tracks whether a font update is pending for when this pane becomes visible
+  const pendingFontUpdateRef = useRef(false);
 
   const [dragOver, setDragOver] = useState(false);
   const [connecting, setConnecting] = useState(false);
@@ -63,6 +67,49 @@ export const TerminalPane = memo(function TerminalPane({
   const currentCwdRef = useRef("~");
   const pwdResponseRef = useRef<string>("");
   const waitingForPwdRef = useRef(false);
+  const isTauriRuntime =
+    typeof window !== "undefined" &&
+    typeof (window as { __TAURI_IPC__?: unknown }).__TAURI_IPC__ === "function";
+
+  function invokeSafe<T = unknown>(
+    command: string,
+    args?: Record<string, unknown>,
+  ) {
+    if (!isTauriRuntime) {
+      return Promise.resolve(undefined as T | undefined);
+    }
+    return invoke<T>(command, args);
+  }
+
+  function listenSafe(
+    event: string,
+    handler: (event: { payload: unknown }) => void,
+  ): Promise<UnlistenFn> {
+    if (!isTauriRuntime) {
+      return Promise.resolve(() => {});
+    }
+    return listen(event, handler as Parameters<typeof listen>[1]);
+  }
+
+  function debugLog(message: string) {
+    const line = `[TerminalPane] ${pane.tabId}: ${message}`;
+    console.log(line);
+    invokeSafe("debug_log", { message: line }).catch(() => {});
+  }
+
+  function warnLog(message: string, err?: unknown) {
+    const detail =
+      err instanceof Error
+        ? `${err.name}: ${err.message}`
+        : err
+          ? String(err)
+          : "";
+    const line = detail
+      ? `[TerminalPane] ${pane.tabId}: ${message} | ${detail}`
+      : `[TerminalPane] ${pane.tabId}: ${message}`;
+    console.warn(line, err);
+    invokeSafe("debug_log", { message: line }).catch(() => {});
+  }
 
   useEffect(() => {
     currentCwdRef.current = currentCwd;
@@ -70,12 +117,12 @@ export const TerminalPane = memo(function TerminalPane({
 
   // Listen to Tauri file-drop events only when this pane is visible
   useEffect(() => {
-    if (!visible) return;
+    if (!visible || !isTauriRuntime) return;
     const unlisteners: Array<() => void> = [];
     let mounted = true;
 
     Promise.all([
-      listen("tauri://file-drop", (e) => {
+      listenSafe("tauri://file-drop", (e) => {
         setDragOver(false);
         const paths = e.payload as string[];
         if (paths && paths.length > 0) {
@@ -83,7 +130,7 @@ export const TerminalPane = memo(function TerminalPane({
           if (sid) {
             waitingForPwdRef.current = true;
             pwdResponseRef.current = "";
-            invoke("send_ssh_input", { sessionId: sid, input: "pwd\n" });
+            invokeSafe("send_ssh_input", { sessionId: sid, input: "pwd\n" });
             setTimeout(() => {
               setSftpRemoteDir(currentCwdRef.current || "~");
               setSftpFiles(paths);
@@ -95,11 +142,11 @@ export const TerminalPane = memo(function TerminalPane({
           }
         }
       }),
-      listen("tauri://file-drop-hover", () => {
+      listenSafe("tauri://file-drop-hover", () => {
         if ((window as any).__tabDragging) return;
         setDragOver(true);
       }),
-      listen("tauri://file-drop-cancelled", () => setDragOver(false)),
+      listenSafe("tauri://file-drop-cancelled", () => setDragOver(false)),
     ]).then((fns) => {
       if (mounted) {
         unlisteners.push(...fns);
@@ -112,15 +159,15 @@ export const TerminalPane = memo(function TerminalPane({
       mounted = false;
       unlisteners.forEach((u) => u());
     };
-  }, [visible]);
+  }, [isTauriRuntime, visible]);
 
   // Listen to sftp-progress events
   useEffect(() => {
-    if (!visible) return;
+    if (!visible || !isTauriRuntime) return;
     const unlisteners: Array<() => void> = [];
     let mounted = true;
 
-    listen("sftp-progress", (e) => {
+    listenSafe("sftp-progress", (e) => {
       const p = e.payload as {
         id: string;
         bytes_sent: number;
@@ -157,7 +204,7 @@ export const TerminalPane = memo(function TerminalPane({
       mounted = false;
       unlisteners.forEach((u) => u());
     };
-  }, [visible]);
+  }, [isTauriRuntime, visible]);
 
   function startSftpUpload() {
     const transfers: TransferMap = {};
@@ -165,7 +212,7 @@ export const TerminalPane = memo(function TerminalPane({
       const id = crypto.randomUUID();
       const name = fp.split(/[\\/]/).pop() || fp;
       transfers[id] = { name, progress: 0, done: false };
-      invoke("upload_file_sftp", {
+      invokeSafe("upload_file_sftp", {
         transferId: id,
         host: pane.sessionEntry.host,
         port: pane.sessionEntry.port,
@@ -206,13 +253,19 @@ export const TerminalPane = memo(function TerminalPane({
     try {
       const webgl = new WebglAddon();
       webgl.onContextLoss(() => {
-        webgl.dispose();
+        warnLog(
+          "WebGL context LOST - will attempt recovery on next tab switch",
+        );
         webglRef.current = null;
+        webglLostRef.current = true;
       });
       term.loadAddon(webgl);
       webglRef.current = webgl;
-    } catch (_) {
+      webglLostRef.current = false;
+      debugLog("WebGL renderer active");
+    } catch (e) {
       // WebGL not available — canvas renderer is used automatically
+      warnLog("WebGL unavailable, using canvas", e);
       webglRef.current = null;
     }
 
@@ -255,7 +308,7 @@ export const TerminalPane = memo(function TerminalPane({
           if (!text) return;
           const sid = sshIdRef.current;
           if (sid) {
-            invoke("send_ssh_input", { sessionId: sid, input: text }).catch(
+            invokeSafe("send_ssh_input", { sessionId: sid, input: text }).catch(
               () => {},
             );
           } else if (promptRef.current) {
@@ -275,9 +328,10 @@ export const TerminalPane = memo(function TerminalPane({
               if (!text) return;
               const sid = sshIdRef.current;
               if (sid)
-                invoke("send_ssh_input", { sessionId: sid, input: text }).catch(
-                  () => {},
-                );
+                invokeSafe("send_ssh_input", {
+                  sessionId: sid,
+                  input: text,
+                }).catch(() => {});
             })
             .catch(() => {});
         });
@@ -348,21 +402,25 @@ export const TerminalPane = memo(function TerminalPane({
       }
       const sid = sshIdRef.current;
       if (!sid) return;
-      invoke("send_ssh_input", { sessionId: sid, input: data }).catch(() => {});
+      invokeSafe("send_ssh_input", { sessionId: sid, input: data }).catch(
+        () => {},
+      );
     });
     let resizeTimer: ReturnType<typeof setTimeout> | null = null;
     const handleResize = () => {
+      if (!termRef.current) return; // already disposed — do not touch xterm internals
       if (!visibleRef.current) return; // skip resize work for hidden panes
       if (resizeTimer !== null) clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
         resizeTimer = null;
         requestAnimationFrame(() => {
+          if (!termRef.current) return; // disposed during debounce window
           try {
             fitRef.current?.fit();
           } catch (_) {}
           const sid = sshIdRef.current;
           if (!sid) return;
-          invoke("resize_pty", {
+          invokeSafe("resize_pty", {
             sessionId: sid,
             cols: term.cols,
             rows: term.rows,
@@ -376,7 +434,7 @@ export const TerminalPane = memo(function TerminalPane({
       e.preventDefault();
       const sid = sshIdRef.current;
       if (sid) {
-        invoke("send_ssh_input", { sessionId: sid, input: text }).catch(
+        invokeSafe("send_ssh_input", { sessionId: sid, input: text }).catch(
           () => {},
         );
       } else if (promptRef.current) {
@@ -406,14 +464,36 @@ export const TerminalPane = memo(function TerminalPane({
       resizeObserver.disconnect();
       if (unlistenRef.current) unlistenRef.current();
       const sid = sshIdRef.current;
-      if (sid) invoke("stop_ssh_session", { sessionId: sid }).catch(() => {});
+      if (sid)
+        invokeSafe("stop_ssh_session", { sessionId: sid }).catch(() => {});
       containerRef.current?.removeEventListener("paste", handlePaste);
       window.removeEventListener("resize", handleResize);
       containerRef.current?.removeEventListener(
         "contextmenu",
         handleContextMenu,
       );
-      term.dispose();
+      const webglToDispose = webglRef.current as any;
+      termRef.current = null;
+      fitRef.current = null;
+      webglRef.current = null;
+      if (webglToDispose) {
+        try {
+          webglToDispose.dispose();
+        } catch (_) {}
+      }
+      // Clear xterm's internal IdleTaskQueue before dispose so pending idle
+      // callbacks (e.g. ViewportOverscanService.handleResize) don't fire after
+      // the terminal services are torn down.
+      try {
+        const core = (term as any)._core;
+        if (core?._idleTaskQueue?._queue) core._idleTaskQueue._queue = [];
+        if (core?._viewport) core._viewport.dispose?.();
+      } catch (_) {}
+      try {
+        term.dispose();
+      } catch (err) {
+        warnLog("term.dispose ERROR", err);
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -422,21 +502,64 @@ export const TerminalPane = memo(function TerminalPane({
     if (visible) {
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
+          const term = termRef.current;
+          debugLog(
+            `became visible - webglLost=${webglLostRef.current} pendingFont=${pendingFontUpdateRef.current} hasTerm=${!!term}`,
+          );
           try {
-            fitRef.current?.fit();
-          } catch (_) {}
-          termRef.current?.focus();
+            // Recover WebGL context if it was lost while the tab was hidden
+            if (webglLostRef.current && term && containerRef.current) {
+              debugLog("attempting WebGL context recovery");
+              try {
+                const webgl = new WebglAddon();
+                webgl.onContextLoss(() => {
+                  warnLog("WebGL context LOST (recovery addon)");
+                  webglRef.current = null;
+                  webglLostRef.current = true;
+                });
+                term.loadAddon(webgl);
+                webglRef.current = webgl;
+                webglLostRef.current = false;
+                debugLog("WebGL context recovered");
+              } catch (e) {
+                warnLog("WebGL recovery failed, staying on canvas", e);
+                webglLostRef.current = false;
+              }
+            }
+
+            // Apply any deferred font update first so fit() uses the correct metrics
+            if (pendingFontUpdateRef.current) {
+              pendingFontUpdateRef.current = false;
+              debugLog("visible - applying deferred font refresh");
+              applyFontRefresh();
+            } else {
+              fitRef.current?.fit();
+              // Force a full re-render in case the canvas was blank
+              term?.refresh(0, (term?.rows ?? 1) - 1);
+            }
+          } catch (err) {
+            warnLog("visible recovery error", err);
+          }
+          term?.focus();
         });
       });
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
 
   const connect = useCallback(
     (overrideUser?: string, overridePass?: string) => {
       const term = termRef.current;
       if (!term) return;
+      if (!isTauriRuntime) {
+        warnLog("connect skipped because Tauri runtime is unavailable");
+        term.write(
+          "\r\n\x1b[31m✖ Tauri runtime unavailable in browser mode\x1b[0m\r\n",
+        );
+        return;
+      }
       if (sshIdRef.current) {
-        invoke("stop_ssh_session", { sessionId: sshIdRef.current }).catch(
+        invokeSafe("stop_ssh_session", { sessionId: sshIdRef.current }).catch(
           () => {},
         );
         if (unlistenRef.current) unlistenRef.current();
@@ -454,7 +577,7 @@ export const TerminalPane = memo(function TerminalPane({
       term.write(
         `\x1b[36m◆ Connecting: ${connectUser}@${pane.sessionEntry.host}:${pane.sessionEntry.port}...\x1b[0m\r\n`,
       );
-      invoke("start_ssh_session", {
+      invokeSafe("start_ssh_session", {
         host: pane.sessionEntry.host,
         port: pane.sessionEntry.port,
         user: connectUser,
@@ -469,7 +592,7 @@ export const TerminalPane = memo(function TerminalPane({
           sshIdRef.current = sshId;
           setConnecting(false);
           onConnected(pane.tabId, sshId);
-          listen(`ssh-output-${sshId}`, (event) => {
+          listenSafe(`ssh-output-${sshId}`, (event) => {
             const payload = event.payload as SshOutputPayload;
             if (waitingForPwdRef.current) {
               pwdResponseRef.current += payload.output;
@@ -532,7 +655,7 @@ export const TerminalPane = memo(function TerminalPane({
       el.__disconnect = () => {
         const sid = sshIdRef.current;
         if (sid) {
-          invoke("stop_ssh_session", { sessionId: sid }).catch(() => {});
+          invokeSafe("stop_ssh_session", { sessionId: sid }).catch(() => {});
           if (unlistenRef.current) unlistenRef.current();
           sshIdRef.current = null;
         }
@@ -570,22 +693,46 @@ export const TerminalPane = memo(function TerminalPane({
       term.options.fontFamily = fontFamily;
       changed = true;
     }
-    if (changed) {
-      try {
-        // Clear the WebGL texture atlas so it is rebuilt with the new font metrics.
-        // Without this, the cached glyph bitmaps stay at the old size and the
-        // terminal looks garbled after a font size change.
-        const wgl = webglRef.current as any;
-        if (wgl) {
-          wgl.clearTextureAtlas?.();
-        }
-        // fit() recalculates cols/rows based on new cell dimensions and issues
-        // a proper resize — this must come before refresh().
-        fitRef.current?.fit();
-        term.refresh(0, term.rows - 1);
-      } catch (_) {}
+    if (!changed) return;
+
+    // If this pane is hidden (display:none), performing WebGL operations or
+    // fit() on a zero-dimension container corrupts the renderer and causes a
+    // white screen. Defer the visual refresh until the pane becomes visible.
+    if (!visibleRef.current) {
+      debugLog(
+        `font change deferred - pane hidden. size=${fontSize} family=${fontFamily}`,
+      );
+      pendingFontUpdateRef.current = true;
+      return;
     }
+    debugLog(
+      `font change - pane visible, applying immediately. size=${fontSize} family=${fontFamily}`,
+    );
+    applyFontRefresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fontSize, fontFamily]);
+
+  function applyFontRefresh() {
+    const term = termRef.current;
+    if (!term) return;
+    try {
+      debugLog(
+        `applyFontRefresh START - size=${term.options.fontSize} family=${term.options.fontFamily} webgl=${!!webglRef.current}`,
+      );
+      // Clear the WebGL texture atlas so it rebuilds with new font metrics.
+      const wgl = webglRef.current as any;
+      if (wgl) {
+        wgl.clearTextureAtlas?.();
+        debugLog("WebGL atlas cleared");
+      }
+      // fit() must come before refresh() so cols/rows match new cell size.
+      fitRef.current?.fit();
+      term.refresh(0, term.rows - 1);
+      debugLog(`applyFontRefresh DONE - cols=${term.cols} rows=${term.rows}`);
+    } catch (err) {
+      warnLog("applyFontRefresh ERROR", err);
+    }
+  }
 
   const activeTransfers = useMemo(
     () => Object.entries(sftpTransfers).filter(([, v]) => !v.done || v.error),

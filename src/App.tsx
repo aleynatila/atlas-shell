@@ -41,6 +41,16 @@ function App() {
   const [openViews, setOpenViews] = useState<
     Set<"overview" | "settings" | "new-session">
   >(() => new Set(["overview"] as const));
+  const [settingsTab, setSettingsTab] = useState<
+    | "sessions"
+    | "credentials"
+    | "tags"
+    | "scripts"
+    | "general"
+    | "updates"
+    | "about"
+    | "appearance"
+  >("sessions");
   const [autoConnectTabId, setAutoConnectTabId] = useState<string | null>(null);
   const [splitTabs, setSplitTabs] = useState<
     Record<string, "horizontal" | "vertical">
@@ -438,6 +448,11 @@ function App() {
     [openView],
   );
 
+  const closeAllTerminals = useCallback(() => {
+    const allTabs = [...tabsRef.current];
+    allTabs.forEach((t) => closeTabById(t.tabId));
+  }, [closeTabById]);
+
   const toggleSplitForTab = useCallback(
     (tabId: string, direction?: "horizontal" | "vertical") => {
       setSplitTabs((prev) => {
@@ -626,8 +641,16 @@ function App() {
 
       {/* ── Main Content ── */}
       <div className="flex-1 overflow-hidden flex flex-col">
-        {/* Settings — conditionally mounted */}
-        {showSettings && (
+        {/* Settings — always mounted, hidden when not active (preserves tab state) */}
+        <div
+          style={{
+            display: showSettings ? undefined : "none",
+            flex: 1,
+            overflow: "hidden",
+            flexDirection: "column",
+            minHeight: 0,
+          }}
+        >
           <Settings
             sessions={sessions}
             credentials={credentials}
@@ -650,8 +673,11 @@ function App() {
             importStatus={importStatus}
             setImportStatus={setImportStatus}
             darkMode={darkMode}
+            settingsTab={settingsTab}
+            setSettingsTab={setSettingsTab}
+            closeAllTerminals={closeAllTerminals}
           />
-        )}
+        </div>
 
         {/* New Session — conditionally mounted */}
         {isNewSession && (
