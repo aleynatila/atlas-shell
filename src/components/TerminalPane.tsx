@@ -23,6 +23,7 @@ interface TerminalPaneProps {
   autoConnect?: boolean;
   fontSize?: number;
   fontFamily?: string;
+  disableAlternateScreen?: boolean;
 }
 
 export const TerminalPane = memo(function TerminalPane({
@@ -35,6 +36,7 @@ export const TerminalPane = memo(function TerminalPane({
   autoConnect,
   fontSize,
   fontFamily,
+  disableAlternateScreen,
 }: TerminalPaneProps) {
   const promptRef = useRef<{
     stage: "user" | "pass";
@@ -57,6 +59,9 @@ export const TerminalPane = memo(function TerminalPane({
   visibleRef.current = visible;
   // Tracks whether a font update is pending for when this pane becomes visible
   const pendingFontUpdateRef = useRef(false);
+  const disableAlternateScreenRef = useRef(disableAlternateScreen ?? false);
+  disableAlternateScreenRef.current = disableAlternateScreen ?? false;
+  const escapeSequenceRemainderRef = useRef("");
 
   const [dragOver, setDragOver] = useState(false);
   const [connecting, setConnecting] = useState(false);
@@ -109,6 +114,71 @@ export const TerminalPane = memo(function TerminalPane({
       : `[TerminalPane] ${pane.tabId}: ${message}`;
     console.warn(line, err);
     invokeSafe("debug_log", { message: line }).catch(() => {});
+  }
+
+  function getWheelScrollLines(event: WheelEvent, rows: number) {
+    if (event.deltaY === 0 || event.shiftKey) return 0;
+
+    const delta = Math.abs(event.deltaY);
+    if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) {
+      return Math.max(1, rows);
+    }
+    if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) {
+      return Math.max(1, Math.round(delta));
+    }
+
+    return Math.max(1, Math.round(delta / 16));
+  }
+
+  function shouldBlockAlternateScreen(
+    params: Array<number | number[]>,
+    action: "enter" | "exit",
+  ) {
+    if (!disableAlternateScreenRef.current) return false;
+
+    const values = params.filter(
+      (value): value is number => typeof value === "number",
+    );
+    const block = values.some((value) => [47, 1047, 1049].includes(value));
+
+    if (block) {
+      debugLog(
+        `blocked alternate-screen ${action} sequence: ${values.join(";")}`,
+      );
+    }
+
+    return block;
+  }
+
+  function stripAlternateScreenSequences(chunk: string) {
+    if (!disableAlternateScreenRef.current) return chunk;
+
+    const combined = `${escapeSequenceRemainderRef.current}${chunk}`;
+    let remainder = "";
+
+    const tailMatch = combined.match(/\x1b\[\??[0-9;]*$/);
+    const complete = tailMatch ? combined.slice(0, tailMatch.index) : combined;
+
+    if (tailMatch) {
+      remainder = tailMatch[0];
+    }
+
+    const sanitized = complete.replace(
+      /\x1b\[\?([0-9;]+)([hl])/g,
+      (sequence, params: string) => {
+        const values = params
+          .split(";")
+          .map((value) => Number.parseInt(value, 10))
+          .filter((value) => Number.isFinite(value));
+
+        return values.some((value) => [47, 1047, 1048, 1049].includes(value))
+          ? ""
+          : sequence;
+      },
+    );
+
+    escapeSequenceRemainderRef.current = remainder;
+    return sanitized;
   }
 
   useEffect(() => {
@@ -247,6 +317,19 @@ export const TerminalPane = memo(function TerminalPane({
     });
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
+    const parserDisposables = [
+      term.parser.registerCsiHandler({ prefix: "?", final: "h" }, (params) =>
+        shouldBlockAlternateScreen(params, "enter"),
+      ),
+      term.parser.registerCsiHandler({ prefix: "?", final: "l" }, (params) =>
+        shouldBlockAlternateScreen(params, "exit"),
+      ),
+    ];
+    const onBufferChange = term.buffer.onBufferChange(() => {
+      debugLog(
+        `buffer changed -> type=${term.buffer.active.type} baseY=${term.buffer.active.baseY} viewportY=${term.buffer.active.viewportY}`,
+      );
+    });
     term.open(containerRef.current);
 
     // GPU-accelerated rendering via WebGL, fall back to canvas
@@ -447,7 +530,44 @@ export const TerminalPane = memo(function TerminalPane({
         }
       }
     };
+    const handleWheel = (event: WheelEvent) => {
+      const term = termRef.current;
+      const sid = sshIdRef.current;
+      if (!term) return;
+
+      const lines = getWheelScrollLines(event, term.rows);
+      if (lines === 0) return;
+
+      if (
+        disableAlternateScreenRef.current &&
+        term.buffer.active.type === "normal" &&
+        (term.buffer.active.baseY > 0 || term.buffer.active.viewportY > 0)
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+        term.scrollLines(event.deltaY < 0 ? -lines : lines);
+        return;
+      }
+
+      if (!sid || term.buffer.active.type !== "alternate") return;
+
+      const applicationCursorKeys = Boolean(
+        (term as any)._core?.coreService?.decPrivateModes
+          ?.applicationCursorKeys,
+      );
+      const direction = event.deltaY < 0 ? "A" : "B";
+      const prefix = applicationCursorKeys ? "\x1bO" : "\x1b[";
+      const input = `${prefix}${direction}`.repeat(lines);
+
+      event.preventDefault();
+      event.stopPropagation();
+      invokeSafe("send_ssh_input", { sessionId: sid, input }).catch(() => {});
+    };
     containerRef.current?.addEventListener("paste", handlePaste);
+    containerRef.current?.addEventListener("wheel", handleWheel, {
+      passive: false,
+      capture: true,
+    });
     window.addEventListener("resize", handleResize);
 
     const resizeObserver = new ResizeObserver(() => {
@@ -461,18 +581,22 @@ export const TerminalPane = memo(function TerminalPane({
       if (resizeTimer !== null) clearTimeout(resizeTimer);
       onData.dispose();
       onSelection.dispose();
+      onBufferChange.dispose();
       resizeObserver.disconnect();
+      parserDisposables.forEach((disposable) => disposable.dispose());
       if (unlistenRef.current) unlistenRef.current();
       const sid = sshIdRef.current;
       if (sid)
         invokeSafe("stop_ssh_session", { sessionId: sid }).catch(() => {});
       containerRef.current?.removeEventListener("paste", handlePaste);
+      containerRef.current?.removeEventListener("wheel", handleWheel, true);
       window.removeEventListener("resize", handleResize);
       containerRef.current?.removeEventListener(
         "contextmenu",
         handleContextMenu,
       );
       const webglToDispose = webglRef.current as any;
+      escapeSequenceRemainderRef.current = "";
       termRef.current = null;
       fitRef.current = null;
       webglRef.current = null;
@@ -616,7 +740,10 @@ export const TerminalPane = memo(function TerminalPane({
                 }
               }
             } else {
-              term.write(payload.output);
+              const output = stripAlternateScreenSequences(payload.output);
+              if (output) {
+                term.write(output);
+              }
             }
           }).then((u) => {
             unlistenRef.current = u;

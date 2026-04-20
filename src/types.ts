@@ -29,6 +29,7 @@ export interface GeneralSettings {
   theme: string;
   autoCheckUpdates?: boolean;
   updatePermissionAsked?: boolean;
+  disableAlternateScreen?: boolean;
 }
 
 export interface SshOutputPayload {

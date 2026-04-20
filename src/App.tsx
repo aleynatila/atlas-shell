@@ -123,6 +123,7 @@ function App() {
           theme: "light",
           autoCheckUpdates: false,
           updatePermissionAsked: false,
+          disableAlternateScreen: false,
         };
       } catch {
         return {
@@ -132,6 +133,7 @@ function App() {
           theme: "light",
           autoCheckUpdates: false,
           updatePermissionAsked: false,
+          disableAlternateScreen: false,
         };
       }
     },
@@ -648,7 +650,7 @@ function App() {
         {/* Settings — always mounted, hidden when not active (preserves tab state) */}
         <div
           style={{
-            display: showSettings ? undefined : "none",
+            display: showSettings ? "flex" : "none",
             flex: 1,
             overflow: "hidden",
             flexDirection: "column",
@@ -782,6 +784,9 @@ function App() {
                       autoConnect={autoConnectTabId === tab.tabId}
                       fontSize={generalSettings.fontSize}
                       fontFamily={generalSettings.fontFamily}
+                      disableAlternateScreen={
+                        generalSettings.disableAlternateScreen ?? false
+                      }
                     />
                   </div>
                 ))}
@@ -815,6 +820,9 @@ function App() {
                       autoConnect
                       fontSize={generalSettings.fontSize}
                       fontFamily={generalSettings.fontFamily}
+                      disableAlternateScreen={
+                        generalSettings.disableAlternateScreen ?? false
+                      }
                     />
                   </div>
                 </div>

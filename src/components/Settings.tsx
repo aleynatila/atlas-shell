@@ -1,7 +1,11 @@
 import { getVersion as getAppVersion } from "@tauri-apps/api/app";
 import { relaunch } from "@tauri-apps/api/process";
 import { open as shellOpen } from "@tauri-apps/api/shell";
-import { checkUpdate, installUpdate, onUpdaterEvent } from "@tauri-apps/api/updater";
+import {
+  checkUpdate,
+  installUpdate,
+  onUpdaterEvent,
+} from "@tauri-apps/api/updater";
 import {
   Download,
   Edit2,
@@ -278,7 +282,7 @@ export function Settings({
   }
 
   return (
-    <div className="flex flex-1 overflow-hidden">
+    <div className="flex flex-1 min-h-0 overflow-hidden">
       {/* Left nav */}
       <div className="w-44 bg-hx-panel border-r border-hx-border flex flex-col gap-1 p-3 shrink-0">
         {(
@@ -311,7 +315,7 @@ export function Settings({
       </div>
 
       {/* Right content */}
-      <div className="flex-1 overflow-y-auto p-6">
+      <div className="flex-1 min-h-0 overflow-y-auto p-6">
         {/* Settings search */}
         <div className="mb-4">
           <input
@@ -1090,6 +1094,40 @@ export function Settings({
                 </button>{" "}
                 tab.
               </p>
+              <div className="pt-2 border-t border-hx-border space-y-2">
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <label className="block text-[10px] font-mono uppercase tracking-widest text-hx-neon/60">
+                      Keep Scrollback In Nano/Vim
+                    </label>
+                    <p className="text-[10px] text-hx-dim font-mono mt-1 leading-relaxed">
+                      Disables the alternate screen for full-screen terminal
+                      apps so mouse wheel can scroll terminal history while the
+                      app stays open, similar to PuTTY.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() =>
+                      saveGeneral({
+                        ...generalSettings,
+                        disableAlternateScreen: !(
+                          generalSettings.disableAlternateScreen ?? false
+                        ),
+                      })
+                    }
+                    className={`relative w-8 h-4 rounded-full transition-colors shrink-0 ${(generalSettings.disableAlternateScreen ?? false) ? "bg-hx-neon/30" : "bg-hx-border"}`}
+                  >
+                    <div
+                      className={`absolute top-0.5 w-3 h-3 rounded-full transition-all ${(generalSettings.disableAlternateScreen ?? false) ? "left-4 bg-hx-neon" : "left-0.5 bg-hx-dim"}`}
+                      style={
+                        (generalSettings.disableAlternateScreen ?? false)
+                          ? { boxShadow: "0 0 6px var(--color-hx-neon)" }
+                          : {}
+                      }
+                    />
+                  </button>
+                </div>
+              </div>
               {/* Theme picker */}
               <div className="pt-2 border-t border-hx-border space-y-2">
                 <label className="block text-[10px] font-mono uppercase tracking-widest text-hx-neon/60">
@@ -1301,7 +1339,7 @@ export function Settings({
 
 // ── Updates Tab ───────────────────────────────────────────────────────────────
 
-const CURRENT_VERSION = "0.2.1";
+const CURRENT_VERSION = "0.2.2";
 const RELEASES_URL = "https://github.com/aleynatila/atlas-shell/releases";
 
 interface UpdateInfo {
@@ -1363,7 +1401,9 @@ function UpdatesTab({
 
   const downloadAndInstall = useCallback(async () => {
     if (!latestRelease || !hasTauriRuntime) {
-      setError("Signed updater is only available inside the Tauri desktop app.");
+      setError(
+        "Signed updater is only available inside the Tauri desktop app.",
+      );
       return;
     }
     setInstalling(true);
@@ -1405,7 +1445,9 @@ function UpdatesTab({
 
   const checkForUpdates = useCallback(async () => {
     if (!hasTauriRuntime) {
-      setError("Update checks are only available inside the packaged Atlas desktop app.");
+      setError(
+        "Update checks are only available inside the packaged Atlas desktop app.",
+      );
       setLatestRelease(null);
       setUpdateAvailable(null);
       return;
@@ -1416,23 +1458,24 @@ function UpdatesTab({
     setInstallStatus(null);
     try {
       const update = await checkUpdate();
-      const info: UpdateInfo = update.shouldUpdate && update.manifest
-        ? {
-            version: normalizeVersion(update.manifest.version),
-            name: `v${normalizeVersion(update.manifest.version)}`,
-            body: update.manifest.body || "",
-            publishedAt: update.manifest.date || "",
-            htmlUrl: RELEASES_URL,
-            downloadUrl: null,
-          }
-        : {
-            version: currentVersion,
-            name: `v${currentVersion}`,
-            body: "",
-            publishedAt: "",
-            htmlUrl: RELEASES_URL,
-            downloadUrl: null,
-          };
+      const info: UpdateInfo =
+        update.shouldUpdate && update.manifest
+          ? {
+              version: normalizeVersion(update.manifest.version),
+              name: `v${normalizeVersion(update.manifest.version)}`,
+              body: update.manifest.body || "",
+              publishedAt: update.manifest.date || "",
+              htmlUrl: RELEASES_URL,
+              downloadUrl: null,
+            }
+          : {
+              version: currentVersion,
+              name: `v${currentVersion}`,
+              body: "",
+              publishedAt: "",
+              htmlUrl: RELEASES_URL,
+              downloadUrl: null,
+            };
 
       setUpdateAvailable(update.shouldUpdate);
       setLatestRelease(info);
@@ -1469,7 +1512,8 @@ function UpdatesTab({
             "atlas_update_available",
           );
           if (cached) setLatestRelease(JSON.parse(cached));
-          if (cachedAvailability) setUpdateAvailable(JSON.parse(cachedAvailability));
+          if (cachedAvailability)
+            setUpdateAvailable(JSON.parse(cachedAvailability));
         } catch {}
         return;
       }
