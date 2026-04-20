@@ -1,12 +1,12 @@
 import { invoke } from "@tauri-apps/api/tauri";
 import { WebviewWindow } from "@tauri-apps/api/window";
 import {
-  useCallback,
-  useDeferredValue,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
+    useCallback,
+    useDeferredValue,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
 } from "react";
 import "xterm/css/xterm.css";
 import { NewSession } from "./components/NewSession";
@@ -18,11 +18,11 @@ import { TerminalPane } from "./components/TerminalPane";
 import "./index.css";
 import { getTheme, THEMES } from "./themes";
 import {
-  NEON_COLORS,
-  type Credential,
-  type GeneralSettings,
-  type SessionEntry,
-  type TabPane,
+    NEON_COLORS,
+    type Credential,
+    type GeneralSettings,
+    type SessionEntry,
+    type TabPane,
 } from "./types";
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -121,6 +121,8 @@ function App() {
           fontSize: 15,
           fontFamily: "'Cascadia Mono', Consolas, monospace",
           theme: "light",
+          autoCheckUpdates: false,
+          updatePermissionAsked: false,
         };
       } catch {
         return {
@@ -128,6 +130,8 @@ function App() {
           fontSize: 15,
           fontFamily: "'Cascadia Mono', Consolas, monospace",
           theme: "light",
+          autoCheckUpdates: false,
+          updatePermissionAsked: false,
         };
       }
     },

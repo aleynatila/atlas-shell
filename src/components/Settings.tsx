@@ -1,4 +1,7 @@
+import { getVersion as getAppVersion } from "@tauri-apps/api/app";
+import { relaunch } from "@tauri-apps/api/process";
 import { open as shellOpen } from "@tauri-apps/api/shell";
+import { checkUpdate, installUpdate, onUpdaterEvent } from "@tauri-apps/api/updater";
 import {
   Download,
   Edit2,
@@ -882,7 +885,7 @@ export function Settings({
                     }}
                     className="text-hx-text leading-relaxed"
                   >
-                    <div>atlas-shell v0.1.9 — SSH Client</div>
+                    <div>{`atlas-shell v${CURRENT_VERSION} — SSH Client`}</div>
                     <div className="text-hx-neon">
                       root@server:~$ ls -la /var/log/
                     </div>
@@ -1210,7 +1213,7 @@ export function Settings({
                   Atlas
                 </span>
                 <span className="text-xs text-hx-dim font-mono bg-hx-bg border border-hx-border px-2 py-0.5 rounded">
-                  v0.1.0
+                  {`v${CURRENT_VERSION}`}
                 </span>
               </div>
               <p className="text-xs text-hx-muted font-mono leading-relaxed">
@@ -1298,9 +1301,8 @@ export function Settings({
 
 // ── Updates Tab ───────────────────────────────────────────────────────────────
 
-const CURRENT_VERSION = "0.1.7";
-const GITHUB_REPO = "aleynatila/atlas-shell";
-const RELEASES_URL = `https://github.com/${GITHUB_REPO}/releases`;
+const CURRENT_VERSION = "0.2.1";
+const RELEASES_URL = "https://github.com/aleynatila/atlas-shell/releases";
 
 interface UpdateInfo {
   version: string;
@@ -1323,6 +1325,9 @@ function UpdatesTab({
   const [error, setError] = useState<string | null>(null);
   const [installing, setInstalling] = useState(false);
   const [installStatus, setInstallStatus] = useState<string | null>(null);
+  const [currentVersion, setCurrentVersion] = useState(CURRENT_VERSION);
+  const [confirmInstall, setConfirmInstall] = useState(false);
+  const [updateAvailable, setUpdateAvailable] = useState<boolean | null>(null);
   const [lastChecked, setLastChecked] = useState<string | null>(() => {
     try {
       return localStorage.getItem("atlas_last_update_check");
@@ -1331,149 +1336,165 @@ function UpdatesTab({
     }
   });
 
-  const autoCheck = generalSettings.autoCheckUpdates ?? true;
+  const updatePermissionAsked = generalSettings.updatePermissionAsked ?? false;
+  const autoCheck = generalSettings.autoCheckUpdates ?? false;
+  const hasTauriRuntime =
+    typeof window !== "undefined" && "__TAURI_IPC__" in window;
+
+  useEffect(() => {
+    let mounted = true;
+    getAppVersion()
+      .then((version) => {
+        if (mounted && version) setCurrentVersion(normalizeVersion(version));
+      })
+      .catch(() => {});
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const openExternalUrl = useCallback(async (url: string) => {
+    try {
+      await shellOpen(url);
+    } catch {
+      window.open(url, "_blank", "noopener,noreferrer");
+    }
+  }, []);
 
   const downloadAndInstall = useCallback(async () => {
-    if (!latestRelease) return;
-    const url = latestRelease.downloadUrl;
-    if (!url) {
-      shellOpen(latestRelease.htmlUrl);
+    if (!latestRelease || !hasTauriRuntime) {
+      setError("Signed updater is only available inside the Tauri desktop app.");
       return;
     }
     setInstalling(true);
-    setInstallStatus("Downloading installer...");
+    setInstallStatus("Downloading signed update package...");
     setError(null);
+    let unlisten: (() => void) | undefined;
     try {
-      const { Command } = await import("@tauri-apps/api/shell");
-      // Download to %TEMP% then launch installer; PS exits after Start-Process returns
-      const ps = `$dest = "$env:TEMP\\atlas-update.exe"; (New-Object Net.WebClient).DownloadFile('${url}', $dest); Start-Process $dest`;
-      const result = await new Command("powershell", [
-        "-NoProfile",
-        "-Command",
-        ps,
-      ]).execute();
-      if (result.code !== 0) {
-        throw new Error(
-          result.stderr || "PowerShell exited with code " + result.code,
-        );
-      }
-      setInstallStatus("Installer launched — closing app...");
-      setTimeout(async () => {
-        const { exit } = await import("@tauri-apps/api/process");
-        await exit(0);
-      }, 1200);
+      unlisten = await onUpdaterEvent(({ error: updaterError, status }) => {
+        if (updaterError) {
+          setError(`Update failed: ${updaterError}`);
+          return;
+        }
+
+        if (status === "PENDING") {
+          setInstallStatus("Downloading signed update package...");
+        } else if (status === "DONE") {
+          setInstallStatus("Update installed. Restarting Atlas...");
+        }
+      });
+
+      await installUpdate();
+      setConfirmInstall(false);
+      setUpdateAvailable(false);
+      setLatestRelease((current) =>
+        current
+          ? { ...current, version: currentVersion, name: `v${currentVersion}` }
+          : current,
+      );
+      setInstallStatus("Update installed. Restarting Atlas...");
+      await relaunch();
     } catch (err) {
       setError(`Update failed: ${String(err)}`);
-      setInstalling(false);
       setInstallStatus(null);
+    } finally {
+      unlisten?.();
+      setInstalling(false);
     }
-  }, [latestRelease]);
+  }, [currentVersion, hasTauriRuntime, latestRelease]);
 
   const checkForUpdates = useCallback(async () => {
+    if (!hasTauriRuntime) {
+      setError("Update checks are only available inside the packaged Atlas desktop app.");
+      setLatestRelease(null);
+      setUpdateAvailable(null);
+      return;
+    }
+
     setChecking(true);
     setError(null);
+    setInstallStatus(null);
     try {
-      const res = await fetch(
-        `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`,
-        { headers: { Accept: "application/vnd.github.v3+json" } },
-      );
-      if (!res.ok) {
-        if (res.status === 404) {
-          setError("No releases found yet.");
-        } else if (res.status === 403) {
-          setError("Rate limited — try again in a minute.");
-        } else {
-          setError(`GitHub API error (${res.status})`);
-        }
-        setChecking(false);
-        return;
-      }
-      const data = await res.json();
-      const tag: string = data.tag_name ?? "";
-      const version = tag.replace(/^v/, "");
+      const update = await checkUpdate();
+      const info: UpdateInfo = update.shouldUpdate && update.manifest
+        ? {
+            version: normalizeVersion(update.manifest.version),
+            name: `v${normalizeVersion(update.manifest.version)}`,
+            body: update.manifest.body || "",
+            publishedAt: update.manifest.date || "",
+            htmlUrl: RELEASES_URL,
+            downloadUrl: null,
+          }
+        : {
+            version: currentVersion,
+            name: `v${currentVersion}`,
+            body: "",
+            publishedAt: "",
+            htmlUrl: RELEASES_URL,
+            downloadUrl: null,
+          };
 
-      // Find .exe asset for download
-      const assets: { name: string; browser_download_url: string }[] =
-        data.assets ?? [];
-      const exeAsset = assets.find(
-        (a) => a.name.endsWith(".exe") || a.name.endsWith(".msi"),
-      );
-
-      const info: UpdateInfo = {
-        version,
-        name: data.name || tag,
-        body: data.body || "",
-        publishedAt: data.published_at || "",
-        htmlUrl: data.html_url || RELEASES_URL,
-        downloadUrl: exeAsset?.browser_download_url ?? null,
-      };
+      setUpdateAvailable(update.shouldUpdate);
       setLatestRelease(info);
 
       const now = new Date().toISOString();
       setLastChecked(now);
       try {
         localStorage.setItem("atlas_last_update_check", now);
+        localStorage.setItem("atlas_latest_release", JSON.stringify(info));
+        localStorage.setItem(
+          "atlas_update_available",
+          JSON.stringify(update.shouldUpdate),
+        );
       } catch {}
     } catch (err) {
-      setError(`Network error: ${String(err)}`);
+      setUpdateAvailable(null);
+      setError(`Update check failed: ${String(err)}`);
     } finally {
       setChecking(false);
     }
-  }, []);
+  }, [currentVersion, hasTauriRuntime]);
 
   // Auto-check on mount if enabled
   useEffect(() => {
-    if (!autoCheck) return;
+    if (!updatePermissionAsked || !autoCheck) return;
     // Only auto-check once per 6 hours
     const last = localStorage.getItem("atlas_last_update_check");
     if (last) {
       const elapsed = Date.now() - new Date(last).getTime();
       if (elapsed < 6 * 60 * 60 * 1000) {
-        // Restore cached result
         try {
           const cached = localStorage.getItem("atlas_latest_release");
+          const cachedAvailability = localStorage.getItem(
+            "atlas_update_available",
+          );
           if (cached) setLatestRelease(JSON.parse(cached));
+          if (cachedAvailability) setUpdateAvailable(JSON.parse(cachedAvailability));
         } catch {}
         return;
       }
     }
-    checkForUpdates().then(() => {
-      // Cache the result
-      try {
-        const cached = localStorage.getItem("atlas_latest_release");
-        if (!cached) {
-          // Will be set after state update, so save on next tick
-          setTimeout(() => {
-            const el = document.querySelector(
-              "[data-latest-version]",
-            ) as HTMLElement | null;
-            if (el?.dataset.latestVersion) {
-              // Handled below in effect
-            }
-          }, 100);
-        }
-      } catch {}
-    });
-  }, [autoCheck, checkForUpdates]);
+    void checkForUpdates();
+  }, [autoCheck, checkForUpdates, updatePermissionAsked]);
 
   // Cache latest release for auto-check throttle
   useEffect(() => {
-    if (latestRelease) {
+    if (latestRelease && updateAvailable !== null) {
       try {
         localStorage.setItem(
           "atlas_latest_release",
           JSON.stringify(latestRelease),
         );
+        localStorage.setItem(
+          "atlas_update_available",
+          JSON.stringify(updateAvailable),
+        );
       } catch {}
     }
-  }, [latestRelease]);
+  }, [latestRelease, updateAvailable]);
 
-  const isNewer =
-    latestRelease &&
-    compareVersions(latestRelease.version, CURRENT_VERSION) > 0;
-  const isUpToDate =
-    latestRelease &&
-    compareVersions(latestRelease.version, CURRENT_VERSION) <= 0;
+  const isNewer = updateAvailable === true && latestRelease;
+  const isUpToDate = updateAvailable === false && latestRelease;
 
   return (
     <div>
@@ -1488,7 +1509,7 @@ function UpdatesTab({
               Current Version
             </p>
             <span className="text-sm font-bold text-hx-text font-mono">
-              v{CURRENT_VERSION}
+              v{currentVersion}
             </span>
           </div>
           {isUpToDate && (
@@ -1575,6 +1596,56 @@ function UpdatesTab({
           </div>
         )}
 
+        {/* Update permission */}
+        {!updatePermissionAsked && (
+          <div className="border-t border-hx-border pt-3 space-y-3">
+            <p className="text-[10px] font-mono uppercase tracking-widest text-hx-neon/60">
+              Automatic Update Checks
+            </p>
+            <p className="text-[10px] text-hx-muted font-mono leading-relaxed">
+              Allow Atlas to check the signed Atlas update feed automatically.
+              Atlas will not install anything silently; it only checks for new
+              versions and asks before downloading and applying a signed update.
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={() =>
+                  saveGeneral({
+                    ...generalSettings,
+                    updatePermissionAsked: true,
+                    autoCheckUpdates: true,
+                  })
+                }
+                className="flex-1 py-2 text-[10px] font-bold uppercase tracking-widest hx-clip-btn transition-all"
+                style={{
+                  background: "linear-gradient(135deg,#00E5FF22,#00E5FF0a)",
+                  border: "1px solid #00E5FF55",
+                  color: "#00E5FF",
+                }}
+              >
+                Allow
+              </button>
+              <button
+                onClick={() =>
+                  saveGeneral({
+                    ...generalSettings,
+                    updatePermissionAsked: true,
+                    autoCheckUpdates: false,
+                  })
+                }
+                className="flex-1 py-2 text-[10px] font-bold uppercase tracking-widest hx-clip-btn transition-all"
+                style={{
+                  background: "linear-gradient(135deg,#33415544,#1e293b44)",
+                  border: "1px solid #475569",
+                  color: "#cbd5e1",
+                }}
+              >
+                Not Now
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Auto-check toggle */}
         <div className="border-t border-hx-border pt-3">
           <div className="flex items-center justify-between">
@@ -1582,13 +1653,14 @@ function UpdatesTab({
               Auto-check for updates
             </span>
             <button
+              disabled={!updatePermissionAsked}
               onClick={() =>
                 saveGeneral({
                   ...generalSettings,
                   autoCheckUpdates: !autoCheck,
                 })
               }
-              className={`relative w-8 h-4 rounded-full transition-colors ${autoCheck ? "bg-hx-neon/30" : "bg-hx-border"}`}
+              className={`relative w-8 h-4 rounded-full transition-colors ${autoCheck ? "bg-hx-neon/30" : "bg-hx-border"} ${!updatePermissionAsked ? "opacity-40 cursor-not-allowed" : ""}`}
             >
               <div
                 className={`absolute top-0.5 w-3 h-3 rounded-full transition-all ${autoCheck ? "left-4 bg-hx-neon" : "left-0.5 bg-hx-dim"}`}
@@ -1601,6 +1673,11 @@ function UpdatesTab({
           {lastChecked && (
             <p className="text-[10px] text-hx-dim font-mono mt-1">
               Last checked: {new Date(lastChecked).toLocaleString()}
+            </p>
+          )}
+          {!updatePermissionAsked && (
+            <p className="text-[10px] text-hx-dim font-mono mt-1">
+              Enable permission above to allow background update checks.
             </p>
           )}
         </div>
@@ -1623,7 +1700,7 @@ function UpdatesTab({
 
           {isNewer && latestRelease && (
             <button
-              onClick={downloadAndInstall}
+              onClick={() => setConfirmInstall(true)}
               disabled={installing}
               className={`flex-1 py-2.5 text-[10px] font-bold uppercase tracking-widest hx-clip-btn transition-all flex items-center justify-center gap-1.5 ${installing ? "opacity-60 cursor-wait" : ""}`}
               style={{
@@ -1639,12 +1716,46 @@ function UpdatesTab({
                 </>
               ) : (
                 <>
-                  <Download size={10} />◆ Update to v{latestRelease.version}
+                  <Download size={10} />◆ Install v{latestRelease.version}
                 </>
               )}
             </button>
           )}
         </div>
+
+        {confirmInstall && latestRelease && (
+          <div className="border border-hx-border bg-hx-bg px-3 py-3 space-y-3">
+            <p className="text-[10px] text-hx-warning font-mono">
+              Atlas will download and verify the signed v{latestRelease.version}
+              update package, then restart the app to finish applying it.
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={() => void downloadAndInstall()}
+                disabled={installing}
+                className="flex-1 py-2 text-[10px] font-bold uppercase tracking-widest hx-clip-btn transition-all"
+                style={{
+                  background: "linear-gradient(135deg,#00FF8822,#00FF880a)",
+                  border: "1px solid #00FF8855",
+                  color: "#00FF88",
+                }}
+              >
+                Confirm Install
+              </button>
+              <button
+                onClick={() => setConfirmInstall(false)}
+                className="flex-1 py-2 text-[10px] font-bold uppercase tracking-widest hx-clip-btn transition-all"
+                style={{
+                  background: "linear-gradient(135deg,#33415544,#1e293b44)",
+                  border: "1px solid #475569",
+                  color: "#cbd5e1",
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Status messages */}
         {installStatus && !error && (
@@ -1658,7 +1769,7 @@ function UpdatesTab({
 
         {/* GitHub link */}
         <button
-          onClick={() => shellOpen(RELEASES_URL)}
+          onClick={() => void openExternalUrl(RELEASES_URL)}
           className="w-full flex items-center justify-center gap-1.5 text-[10px] text-hx-muted font-mono hover:text-hx-neon transition-colors cursor-pointer"
         >
           <ExternalLink size={9} />
@@ -1671,14 +1782,18 @@ function UpdatesTab({
 
 /** Compare semver strings. Returns >0 if a>b, <0 if a<b, 0 if equal. */
 function compareVersions(a: string, b: string): number {
-  const pa = a.split(".").map(Number);
-  const pb = b.split(".").map(Number);
+  const pa = normalizeVersion(a).split(".").map(Number);
+  const pb = normalizeVersion(b).split(".").map(Number);
   for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
     const na = pa[i] ?? 0;
     const nb = pb[i] ?? 0;
     if (na !== nb) return na - nb;
   }
   return 0;
+}
+
+function normalizeVersion(version: string): string {
+  return version.trim().replace(/^v/i, "").split("-")[0] ?? "";
 }
 
 // ── Edit Session Sidebar (shared between Settings and Overview) ──

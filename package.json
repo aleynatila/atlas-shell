@@ -1,6 +1,6 @@
 {
   "name": "atlas",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "scripts": {
     "dev": "vite",
@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "updater:manifest": "node scripts/generate-updater-manifest.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^1.5.0",

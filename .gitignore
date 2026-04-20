@@ -10,6 +10,7 @@ src-tauri/target/
 .env
 .env.*
 !.env.example
+signing/
 
 # Editor
 .idea/

@@ -28,6 +28,7 @@ export interface GeneralSettings {
   darkMode?: boolean;
   theme: string;
   autoCheckUpdates?: boolean;
+  updatePermissionAsked?: boolean;
 }
 
 export interface SshOutputPayload {
