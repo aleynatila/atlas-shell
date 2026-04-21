@@ -4,7 +4,7 @@
 
 **A fast, modern, native SSH client built with Tauri + React**
 
-![Version](https://img.shields.io/badge/version-0.3.1-00E5FF?style=flat-square)
+![Version](https://img.shields.io/badge/version-0.3.2-00E5FF?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Windows-00E5FF?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-00E5FF?style=flat-square)
 ![Rust](https://img.shields.io/badge/rust-1.76+-orange?style=flat-square)
