@@ -1,18 +1,15 @@
 {
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "atlas",
+  "version": "0.3.0",
+  "identifier": "com.atlas.app",
   "build": {
     "beforeBuildCommand": "npm run build",
     "beforeDevCommand": "",
-    "devPath": "http://localhost:5173",
-    "distDir": "../dist"
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../dist"
   },
-  "package": {
-    "productName": "atlas",
-    "version": "0.2.3"
-  },
-  "tauri": {
-    "allowlist": {
-      "all": true
-    },
+  "app": {
     "windows": [
       {
         "title": "Atlas SSH Client",
@@ -20,15 +17,21 @@
         "height": 900,
         "resizable": true,
         "fullscreen": false,
-        "fileDropEnabled": true,
+        "dragDropEnabled": true,
         "decorations": false
       }
     ],
     "security": {
       "csp": null
-    },
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico"]
+  },
+  "plugins": {
     "updater": {
-      "active": true,
       "dialog": false,
       "endpoints": [
         "https://github.com/aleynatila/atlas-shell/releases/latest/download/latest.json"
@@ -37,12 +40,6 @@
       "windows": {
         "installMode": "passive"
       }
-    },
-    "bundle": {
-      "active": true,
-      "targets": ["nsis", "updater"],
-      "identifier": "com.atlas.app",
-      "icon": ["icons/icon.ico"]
     }
   }
 }
