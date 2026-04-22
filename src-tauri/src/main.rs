@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 use once_cell::sync::Lazy;
-use tauri::Manager;
+use tauri::Emitter;
 use serde::Serialize;
 use uuid::Uuid;
 use keyring::Entry;
@@ -86,7 +86,7 @@ fn start_ssh_session(
                     sess.set_timeout(15_000);
                     sess.set_tcp_stream(tcp);
                     if let Err(e) = sess.handshake() {
-                        let _ = app.emit_all(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: format!("handshake failed: {}", e) });
+                        let _ = app.emit(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: format!("handshake failed: {}", e) });
                     } else {
                         let mut authed = false;
                         if let Some(kp) = key_path.clone() {
@@ -95,7 +95,7 @@ fn start_ssh_session(
                             match sess.userauth_pubkey_file(&user, None, pk, passphrase) {
                                 Ok(_) if sess.authenticated() => authed = true,
                                 Err(e) => {
-                                                    let _ = app.emit_all(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: format!("pubkey auth error: {}", e) });
+                                                    let _ = app.emit(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: format!("pubkey auth error: {}", e) });
                                                 }
                                 _ => {}
                             }
@@ -104,7 +104,7 @@ fn start_ssh_session(
                             match sess.userauth_password(&user, &pass) {
                                 Ok(_) if sess.authenticated() => authed = true,
                                 Err(e) => {
-                                                    let _ = app.emit_all(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: format!("password auth error: {}", e) });
+                                                    let _ = app.emit(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: format!("\r\npassword auth error: {}\r\n", e) });
                                                 }
                                 _ => {}
                             }
@@ -138,7 +138,7 @@ fn start_ssh_session(
                                         }
                                         if !combined.is_empty() {
                                             let event_name = format!("ssh-output-{}", session_id_clone);
-                                            let _ = app.emit_all(event_name.as_str(), SshOutput { session: session_id_clone.clone(), output: combined });
+                                            let _ = app.emit(event_name.as_str(), SshOutput { session: session_id_clone.clone(), output: combined });
                                         }
 
                                         match rx.try_recv() {
@@ -179,24 +179,24 @@ fn start_ssh_session(
                                     }
                                 }
                                 Err(err) => {
-                                    let _ = app.emit_all(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: format!("channel error: {}", err) });
+                                    let _ = app.emit(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: format!("\r\nchannel error: {}\r\n", err) });
                                 }
                             }
                         } else {
-                            let _ = app.emit_all(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: "authentication failed".into() });
+                            let _ = app.emit(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: "\r\nauthentication failed\r\n".into() });
                         }
                     }
                 } else {
-                    let _ = app.emit_all(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: "session init failed".into() });
+                    let _ = app.emit(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: "\r\nsession init failed\r\n".into() });
                 }
             }
             Err(e) => {
-                let _ = app.emit_all(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: format!("tcp connect failed: {}", e) });
+                let _ = app.emit(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: format!("\r\ntcp connect failed: {}\r\n", e) });
             }
         }
 
         SESS_TX.lock().unwrap().remove(&session_id_clone);
-        let _ = app.emit_all(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: "[disconnected]".into() });
+        let _ = app.emit(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: "[disconnected]".into() });
     });
 
     Ok(session_id)
@@ -256,12 +256,18 @@ fn upload_file_sftp(
     remote_dir: String,
 ) -> Result<(), String> {
     thread::spawn(move || {
-        let result = do_sftp_upload(
+        // Try SCP first (3-5x faster); fall back to SFTP if unavailable
+        let result = do_scp_upload(
             &app_handle, &transfer_id, &host, port, &user, &pass,
             key_path.as_deref(), &local_path, &remote_dir,
-        );
+        ).or_else(|_| {
+            do_sftp_upload(
+                &app_handle, &transfer_id, &host, port, &user, &pass,
+                key_path.as_deref(), &local_path, &remote_dir,
+            )
+        });
         if let Err(e) = result {
-            let _ = app_handle.emit_all("sftp-progress", SftpProgress {
+            let _ = app_handle.emit("sftp-progress", SftpProgress {
                 id: transfer_id,
                 bytes_sent: 0,
                 total: 0,
@@ -354,29 +360,132 @@ fn do_sftp_upload(
         )
         .map_err(|e| format!("SFTP open {}: {}", remote_file_path, e))?;
 
-    const CHUNK_SIZE: usize = 32768;
+    // 512KB chunks for fast SFTP transfers
+    const CHUNK_SIZE: usize = 524288;
+    // Report progress every 5MB or 10 chunks to reduce IPC overhead
+    const PROGRESS_INTERVAL: usize = 5242880;
+    
     let mut offset = 0usize;
+    let mut last_progress: u64 = 0;
     while offset < local_data.len() {
         let end = (offset + CHUNK_SIZE).min(local_data.len());
         remote_file.write_all(&local_data[offset..end]).map_err(|e| e.to_string())?;
         offset = end;
-        let _ = app.emit_all("sftp-progress", SftpProgress {
-            id: transfer_id.to_string(),
-            bytes_sent: offset as u64,
-            total,
-            done: false,
-            error: None,
-            remote_path: None,
-        });
+        
+        // Throttle progress events: only emit if 5MB+ sent or transfer complete
+        if (offset as u64 - last_progress) >= PROGRESS_INTERVAL as u64 || offset >= local_data.len() {
+            last_progress = offset as u64;
+            let _ = app.emit("sftp-progress", SftpProgress {
+                id: transfer_id.to_string(),
+                bytes_sent: offset as u64,
+                total,
+                done: false,
+                error: None,
+                remote_path: None,
+            });
+        }
     }
 
-    let _ = app.emit_all("sftp-progress", SftpProgress {
+    let _ = app.emit("sftp-progress", SftpProgress {
         id: transfer_id.to_string(),
         bytes_sent: total,
         total,
         done: true,
         error: None,
         remote_path: Some(remote_file_path),
+    });
+    Ok(())
+}
+
+/// SCP upload (3-5x faster than SFTP for large files)
+fn do_scp_upload(
+    app: &tauri::AppHandle,
+    transfer_id: &str,
+    host: &str,
+    port: u16,
+    user: &str,
+    pass: &str,
+    key_path: Option<&str>,
+    local_path: &str,
+    remote_dir: &str,
+) -> Result<(), String> {
+    use std::fs;
+    let tcp = TcpStream::connect(format!("{}:{}", host, port)).map_err(|e| e.to_string())?;
+    let mut sess = Session::new().map_err(|e| e.to_string())?;
+    sess.set_tcp_stream(tcp);
+    sess.handshake().map_err(|e| e.to_string())?;
+
+    let mut authed = false;
+    if let Some(kp) = key_path {
+        if sess.userauth_pubkey_file(user, None, Path::new(kp), None).is_ok() && sess.authenticated() {
+            authed = true;
+        }
+    }
+    if !authed {
+        sess.userauth_password(user, pass).map_err(|e| e.to_string())?;
+        if !sess.authenticated() {
+            return Err("SCP authentication failed".into());
+        }
+    }
+
+    let local_data = fs::read(local_path).map_err(|e| e.to_string())?;
+    let total = local_data.len() as u64;
+
+    let filename = Path::new(local_path)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
+    // SCP command: scp -t -r <remote_dir>
+    let scp_cmd = format!("scp -t -r {}", remote_dir);
+    let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
+    channel.exec(&scp_cmd).map_err(|e| format!("SCP exec failed: {}", e))?;
+
+    // SCP protocol: send "C0644 <size> <filename>\n"
+    let scp_header = format!("C0644 {} {}\n", total, filename);
+    channel.write_all(scp_header.as_bytes()).map_err(|e| e.to_string())?;
+
+    // Send file data in 1MB chunks (SCP has less overhead than SFTP)
+    const CHUNK_SIZE: usize = 1048576;
+    const PROGRESS_INTERVAL: usize = 5242880;
+    
+    let mut offset = 0usize;
+    let mut last_progress: u64 = 0;
+    while offset < local_data.len() {
+        let end = (offset + CHUNK_SIZE).min(local_data.len());
+        channel.write_all(&local_data[offset..end]).map_err(|e| e.to_string())?;
+        offset = end;
+        
+        if (offset as u64 - last_progress) >= PROGRESS_INTERVAL as u64 || offset >= local_data.len() {
+            last_progress = offset as u64;
+            let _ = app.emit("sftp-progress", SftpProgress {
+                id: transfer_id.to_string(),
+                bytes_sent: offset as u64,
+                total,
+                done: false,
+                error: None,
+                remote_path: None,
+            });
+        }
+    }
+
+    // SCP protocol: send null byte to signal EOF
+    channel.write_all(&[0]).map_err(|e| e.to_string())?;
+    channel.flush().map_err(|e| e.to_string())?;
+
+    // Wait for SCP to acknowledge
+    let mut buf = [0u8; 1];
+    let _ = channel.read(&mut buf);
+
+    let remote_path = format!("{}/{}", remote_dir.trim_end_matches('/'), filename);
+    let _ = app.emit("sftp-progress", SftpProgress {
+        id: transfer_id.to_string(),
+        bytes_sent: total,
+        total,
+        done: true,
+        error: None,
+        remote_path: Some(remote_path),
     });
     Ok(())
 }
@@ -420,6 +529,10 @@ fn debug_log(message: String) -> Result<(), String> {
 
 fn main() {
     tauri::Builder::default()
+    .plugin(tauri_plugin_shell::init())
+    .plugin(tauri_plugin_process::init())
+    .plugin(tauri_plugin_updater::Builder::new().build())
+    .plugin(tauri_plugin_clipboard_manager::init())
     .invoke_handler(tauri::generate_handler![
         start_ssh_session,
         send_ssh_input,
