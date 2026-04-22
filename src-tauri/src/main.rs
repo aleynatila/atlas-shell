@@ -241,6 +241,7 @@ struct SftpProgress {
     done: bool,
     error: Option<String>,
     remote_path: Option<String>,
+    protocol: String,
 }
 
 #[tauri::command]
@@ -256,11 +257,20 @@ fn upload_file_sftp(
     remote_dir: String,
 ) -> Result<(), String> {
     thread::spawn(move || {
-        // Try SCP first (3-5x faster); fall back to SFTP if unavailable
-        let result = do_scp_upload(
-            &app_handle, &transfer_id, &host, port, &user, &pass,
-            key_path.as_deref(), &local_path, &remote_dir,
-        ).or_else(|_| {
+        // Fallback chain: rsync (fastest, key-auth only) → SCP → SFTP
+        let result = if let Some(ref kp) = key_path {
+            do_rsync_upload(
+                &app_handle, &transfer_id, &host, port, &user, kp, &local_path, &remote_dir,
+            ).or_else(|_| do_scp_upload(
+                &app_handle, &transfer_id, &host, port, &user, &pass,
+                Some(kp.as_str()), &local_path, &remote_dir,
+            ))
+        } else {
+            do_scp_upload(
+                &app_handle, &transfer_id, &host, port, &user, &pass,
+                None, &local_path, &remote_dir,
+            )
+        }.or_else(|_| {
             do_sftp_upload(
                 &app_handle, &transfer_id, &host, port, &user, &pass,
                 key_path.as_deref(), &local_path, &remote_dir,
@@ -274,8 +284,132 @@ fn upload_file_sftp(
                 done: true,
                 error: Some(e),
                 remote_path: None,
+                protocol: "error".to_string(),
             });
         }
+    });
+    Ok(())
+}
+
+/// Parse a rsync --info=progress2 progress line.
+/// Example: "    1,048,576  50%  10.50MB/s    0:00:01"
+fn parse_rsync_progress_line(line: &str) -> Option<(u64, u8)> {
+    let parts: Vec<&str> = line.trim().split_whitespace().collect();
+    if parts.len() >= 2 {
+        let bytes = parts[0].replace(',', "").parse::<u64>().ok()?;
+        let pct = parts[1].trim_end_matches('%').parse::<u8>().ok()?;
+        return Some((bytes, pct));
+    }
+    None
+}
+
+/// Rsync upload using bundled cwRsync (requires key-based SSH auth).
+/// Falls back gracefully when rsync.exe is not bundled or remote lacks rsync.
+fn do_rsync_upload(
+    app: &tauri::AppHandle,
+    transfer_id: &str,
+    host: &str,
+    port: u16,
+    user: &str,
+    key_path: &str,
+    local_path: &str,
+    remote_dir: &str,
+) -> Result<(), String> {
+    use tauri::Manager;
+    use std::process::{Command, Stdio};
+
+    let resource_dir = app.path().resource_dir().map_err(|e| e.to_string())?;
+    let rsync_exe = resource_dir.join("bin").join("rsync.exe");
+    let ssh_exe = resource_dir.join("bin").join("ssh.exe");
+
+    if !rsync_exe.exists() {
+        return Err("rsync.exe not bundled".into());
+    }
+
+    let total = std::fs::metadata(local_path).map_err(|e| e.to_string())?.len();
+
+    // Build -e ssh command; use bundled ssh.exe + forward-slash paths for cygwin
+    let ssh_bin = if ssh_exe.exists() {
+        ssh_exe.to_string_lossy().replace('\\', "/").to_string()
+    } else {
+        "ssh".to_string()
+    };
+    let key_fwd = key_path.replace('\\', "/");
+    let ssh_cmd = format!(
+        "{} -i {} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p {}",
+        ssh_bin, key_fwd, port
+    );
+    let remote_target = format!("{}@{}:{}/", user, host, remote_dir.trim_end_matches('/'));
+    let bin_dir = resource_dir.join("bin").to_string_lossy().to_string();
+    let path_env = format!("{};{}", bin_dir, std::env::var("PATH").unwrap_or_default());
+
+    let mut child = Command::new(&rsync_exe)
+        .args([
+            "-az",
+            "--info=progress2",
+            "--partial",
+            "--inplace",
+            "-e", &ssh_cmd,
+            local_path,
+            &remote_target,
+        ])
+        .env("PATH", &path_env)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("rsync spawn: {}", e))?;
+
+    // Read stdout; rsync uses \r to update progress in-place
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr_pipe = child.stderr.take();
+    let mut read_buf = [0u8; 4096];
+    let mut line_buf: Vec<u8> = Vec::new();
+
+    loop {
+        let n = stdout.read(&mut read_buf).unwrap_or(0);
+        if n == 0 { break; }
+        for &b in &read_buf[..n] {
+            if b == b'\r' || b == b'\n' {
+                if !line_buf.is_empty() {
+                    let line = String::from_utf8_lossy(&line_buf).to_string();
+                    if let Some((bytes, _)) = parse_rsync_progress_line(&line) {
+                        let _ = app.emit("sftp-progress", SftpProgress {
+                            id: transfer_id.to_string(),
+                            bytes_sent: bytes,
+                            total,
+                            done: false,
+                            error: None,
+                            remote_path: None,
+                            protocol: "rsync".to_string(),
+                        });
+                    }
+                    line_buf.clear();
+                }
+            } else {
+                line_buf.push(b);
+            }
+        }
+    }
+
+    let status = child.wait().map_err(|e| e.to_string())?;
+    if !status.success() {
+        let mut stderr_out = String::new();
+        if let Some(ref mut se) = stderr_pipe {
+            let _ = se.read_to_string(&mut stderr_out);
+        }
+        return Err(format!("rsync ({}): {}", status, stderr_out.trim()));
+    }
+
+    let filename = Path::new(local_path).file_name().unwrap_or_default().to_string_lossy();
+    let remote_path = format!("{}/{}", remote_dir.trim_end_matches('/'), filename);
+    let _ = app.emit("sftp-progress", SftpProgress {
+        id: transfer_id.to_string(),
+        bytes_sent: total,
+        total,
+        done: true,
+        error: None,
+        remote_path: Some(remote_path),
+        protocol: "rsync".to_string(),
     });
     Ok(())
 }
@@ -382,6 +516,7 @@ fn do_sftp_upload(
                 done: false,
                 error: None,
                 remote_path: None,
+                protocol: "sftp".to_string(),
             });
         }
     }
@@ -393,6 +528,7 @@ fn do_sftp_upload(
         done: true,
         error: None,
         remote_path: Some(remote_file_path),
+        protocol: "sftp".to_string(),
     });
     Ok(())
 }
@@ -466,6 +602,7 @@ fn do_scp_upload(
                 done: false,
                 error: None,
                 remote_path: None,
+                protocol: "scp".to_string(),
             });
         }
     }
@@ -486,6 +623,7 @@ fn do_scp_upload(
         done: true,
         error: None,
         remote_path: Some(remote_path),
+        protocol: "scp".to_string(),
     });
     Ok(())
 }

@@ -86,5 +86,6 @@ export type TransferMap = Record<
     error?: string;
     remotePath?: string;
     remoteDir?: string;
+    protocol?: string;
   }
 >;

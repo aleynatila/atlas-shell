@@ -28,7 +28,12 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
-    "icon": ["icons/icon.ico"]
+    "icon": ["icons/icon.ico"],
+    "resources": {
+      "bin/rsync.exe": "bin/rsync.exe",
+      "bin/ssh.exe": "bin/ssh.exe",
+      "bin/cygwin1.dll": "bin/cygwin1.dll"
+    }
   },
   "plugins": {
     "updater": {

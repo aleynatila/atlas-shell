@@ -28,6 +28,10 @@ desktop.ini
 src-tauri/WixTools/
 src-tauri/target/
 
+# cwRsync binaries (download manually, see src-tauri/bin/README.md)
+src-tauri/bin/*.exe
+src-tauri/bin/*.dll
+
 # Logs
 *.log
 

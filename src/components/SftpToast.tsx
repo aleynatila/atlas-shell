@@ -2,6 +2,21 @@ import { Upload, X } from "lucide-react";
 import { memo, useState } from "react";
 import type { TransferMap } from "../types";
 
+const PROTOCOL_STYLES: Record<string, { label: string; className: string }> = {
+  rsync: { label: "rsync", className: "text-purple-400 border-purple-400/40" },
+  scp:   { label: "scp",   className: "text-hx-neon border-hx-neon/40" },
+  sftp:  { label: "sftp",  className: "text-hx-dim border-hx-border" },
+};
+
+function ProtocolBadge({ protocol }: { protocol: string }) {
+  const style = PROTOCOL_STYLES[protocol] ?? { label: protocol, className: "text-hx-dim border-hx-border" };
+  return (
+    <span className={`text-[9px] font-mono uppercase border rounded px-1 py-px shrink-0 ${style.className}`}>
+      {style.label}
+    </span>
+  );
+}
+
 export const SftpToast = memo(function SftpToast({
   transfers,
   activeTransfers,
@@ -71,6 +86,9 @@ export const SftpToast = memo(function SftpToast({
                 >
                   {t.name}
                 </span>
+                {t.protocol && !t.done && !t.error && (
+                  <ProtocolBadge protocol={t.protocol} />
+                )}
                 {t.error ? (
                   <span className="text-hx-danger shrink-0">error</span>
                 ) : t.done ? (
@@ -136,12 +154,17 @@ export const SftpToast = memo(function SftpToast({
                       <span className="text-xs text-hx-text font-mono truncate">
                         {t.name}
                       </span>
-                      <button
-                        onClick={() => onDismiss(id)}
-                        className="text-hx-dim hover:text-hx-text transition-colors shrink-0"
-                      >
-                        <X size={10} />
-                      </button>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {t.protocol && (
+                          <ProtocolBadge protocol={t.protocol} />
+                        )}
+                        <button
+                          onClick={() => onDismiss(id)}
+                          className="text-hx-dim hover:text-hx-text transition-colors"
+                        >
+                          <X size={10} />
+                        </button>
+                      </div>
                     </div>
                     {t.error ? (
                       <span className="text-[10px] text-hx-danger font-mono">

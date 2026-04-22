@@ -1,9 +1,9 @@
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
-  readText as clipboardRead,
-  writeText as clipboardWrite,
-} from "@tauri-apps/api/clipboard";
-import { listen, UnlistenFn } from "@tauri-apps/api/event";
-import { invoke } from "@tauri-apps/api/tauri";
+    readText as clipboardRead,
+    writeText as clipboardWrite,
+} from "@tauri-apps/plugin-clipboard-manager";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Terminal } from "xterm";
 import { FitAddon } from "xterm-addon-fit";
@@ -74,7 +74,8 @@ export const TerminalPane = memo(function TerminalPane({
   const waitingForPwdRef = useRef(false);
   const isTauriRuntime =
     typeof window !== "undefined" &&
-    typeof (window as { __TAURI_IPC__?: unknown }).__TAURI_IPC__ === "function";
+    typeof (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ ===
+      "object";
 
   function invokeSafe<T = unknown>(
     command: string,
@@ -139,15 +140,23 @@ export const TerminalPane = memo(function TerminalPane({
     const values = params.filter(
       (value): value is number => typeof value === "number",
     );
-    const block = values.some((value) => [47, 1047, 1049].includes(value));
 
-    if (block) {
+    const hasAlt = values.some((value) =>
+      [47, 1047, 1048, 1049].includes(value),
+    );
+
+    // Block both enter and exit at parser level. Without blocking exit,
+    // xterm will try to restore the normal buffer visually which leaves
+    // garbage on screen (nano artefacts). Stream-level stripping is a
+    // further layer but the parser handler is the primary safeguard.
+    if (hasAlt) {
       debugLog(
         `blocked alternate-screen ${action} sequence: ${values.join(";")}`,
       );
+      return true;
     }
 
-    return block;
+    return false;
   }
 
   function stripAlternateScreenSequences(chunk: string) {
@@ -164,16 +173,24 @@ export const TerminalPane = memo(function TerminalPane({
     }
 
     const sanitized = complete.replace(
-      /\x1b\[\?([0-9;]+)([hl])/g,
-      (sequence, params: string) => {
-        const values = params
+      /\x1b\[\??([0-9;]*)([hl])/g,
+      (sequence, params: string, modeChar: string) => {
+        const values = (params || "")
           .split(";")
           .map((value) => Number.parseInt(value, 10))
           .filter((value) => Number.isFinite(value));
 
-        return values.some((value) => [47, 1047, 1048, 1049].includes(value))
-          ? ""
-          : sequence;
+        const isAltScreen = values.some((value) =>
+          [47, 1047, 1049].includes(value),
+        );
+        if (!isAltScreen) return sequence;
+
+        // On exit (l), replace with a full screen clear so nano's UI is
+        // wiped from the normal buffer before the shell prompt appears.
+        if (modeChar === "l") return "\x1b[2J\x1b[H";
+
+        // On enter (h), just strip — we never switch buffers.
+        return "";
       },
     );
 
@@ -185,17 +202,40 @@ export const TerminalPane = memo(function TerminalPane({
     currentCwdRef.current = currentCwd;
   }, [currentCwd]);
 
-  // Listen to Tauri file-drop events only when this pane is visible
+  // Helper: check if a {x, y} point (screen coords from Tauri v2 drag events)
+  // falls within this pane's bounding rect.
+  function isDropInsidePane(x: number, y: number): boolean {
+    const el = wrapperRef.current;
+    if (!el) return false;
+    const rect = el.getBoundingClientRect();
+    return (
+      x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
+    );
+  }
+
+  // Listen to Tauri v2 file-drop events only when this pane is visible.
+  // v2 drag-drop payload includes { paths, position } so we can route drops
+  // to the correct split-pane instead of showing the dialog on all panes.
   useEffect(() => {
     if (!visible || !isTauriRuntime) return;
     const unlisteners: Array<() => void> = [];
     let mounted = true;
 
     Promise.all([
-      listenSafe("tauri://file-drop", (e) => {
+      listenSafe("tauri://drag-drop", (e) => {
+        const payload = e.payload as {
+          paths?: string[];
+          position?: { x: number; y: number };
+        };
+        const paths = payload.paths ?? (e.payload as string[]);
+        const pos = payload.position;
+
+        // If position info is available, only handle the drop if it landed
+        // inside this pane (fixes split-pane: both panels showing dialog).
+        if (pos && !isDropInsidePane(pos.x, pos.y)) return;
+
         setDragOver(false);
-        const paths = e.payload as string[];
-        if (paths && paths.length > 0) {
+        if (Array.isArray(paths) && paths.length > 0) {
           const sid = sshIdRef.current;
           if (sid) {
             waitingForPwdRef.current = true;
@@ -212,11 +252,18 @@ export const TerminalPane = memo(function TerminalPane({
           }
         }
       }),
-      listenSafe("tauri://file-drop-hover", () => {
+      listenSafe("tauri://drag-over", (e) => {
         if ((window as any).__tabDragging) return;
-        setDragOver(true);
+        const payload = e.payload as { position?: { x: number; y: number } };
+        const pos = payload?.position;
+        // Only light up the overlay for the pane under the cursor.
+        if (pos) {
+          setDragOver(isDropInsidePane(pos.x, pos.y));
+        } else {
+          setDragOver(true);
+        }
       }),
-      listenSafe("tauri://file-drop-cancelled", () => setDragOver(false)),
+      listenSafe("tauri://drag-leave", () => setDragOver(false)),
     ]).then((fns) => {
       if (mounted) {
         unlisteners.push(...fns);
@@ -245,26 +292,35 @@ export const TerminalPane = memo(function TerminalPane({
         done: boolean;
         error?: string;
         remote_path?: string;
+        protocol?: string;
       };
-      setSftpTransfers((prev) => ({
-        ...prev,
-        [p.id]: {
-          ...(prev[p.id] || { name: p.id }),
-          progress:
-            p.total > 0 ? Math.round((p.bytes_sent / p.total) * 100) : 0,
-          done: p.done,
-          error: p.error,
-          ...(p.remote_path
-            ? {
-                remotePath: p.remote_path,
-                remoteDir: p.remote_path.substring(
-                  0,
-                  p.remote_path.lastIndexOf("/"),
-                ),
-              }
-            : {}),
-        },
-      }));
+      setSftpTransfers((prev) => {
+        // Only handle progress for transfers THIS pane started.
+        // app.emit_all() broadcasts to all webviews; ignoring unknown IDs
+        // prevents other panes' uploads from leaking into this pane's toast,
+        // and also prevents re-adding entries the user already dismissed.
+        if (!(p.id in prev)) return prev;
+        return {
+          ...prev,
+          [p.id]: {
+            ...prev[p.id],
+            progress:
+              p.total > 0 ? Math.round((p.bytes_sent / p.total) * 100) : 0,
+            done: p.done,
+            error: p.error,
+            ...(p.protocol ? { protocol: p.protocol } : {}),
+            ...(p.remote_path
+              ? {
+                  remotePath: p.remote_path,
+                  remoteDir: p.remote_path.substring(
+                    0,
+                    p.remote_path.lastIndexOf("/"),
+                  ),
+                }
+              : {}),
+          },
+        };
+      });
     }).then((u) => {
       if (mounted) unlisteners.push(u);
       else u();
@@ -389,6 +445,15 @@ export const TerminalPane = memo(function TerminalPane({
       clipboardRead()
         .then((text) => {
           if (!text) return;
+          const term = termRef.current;
+          if (term) {
+            try {
+              term.paste(text);
+              return;
+            } catch {
+              // fallthrough to raw send
+            }
+          }
           const sid = sshIdRef.current;
           if (sid) {
             invokeSafe("send_ssh_input", { sessionId: sid, input: text }).catch(
@@ -398,7 +463,7 @@ export const TerminalPane = memo(function TerminalPane({
             const pr = promptRef.current;
             if (pr.stage === "user") {
               pr.user += text;
-              term.write(text);
+              termRef.current?.write(text);
             } else {
               pr.pass += text;
             }
@@ -409,6 +474,13 @@ export const TerminalPane = memo(function TerminalPane({
             ?.readText()
             .then((text) => {
               if (!text) return;
+              const term = termRef.current;
+              if (term) {
+                try {
+                  term.paste(text);
+                  return;
+                } catch {}
+              }
               const sid = sshIdRef.current;
               if (sid)
                 invokeSafe("send_ssh_input", {
@@ -515,6 +587,17 @@ export const TerminalPane = memo(function TerminalPane({
       const text = e.clipboardData?.getData("text");
       if (!text) return;
       e.preventDefault();
+      const term = termRef.current;
+      if (term) {
+        try {
+          // Use xterm's paste API so bracketed-paste and EOL normalization
+          // are handled correctly for apps like nano.
+          term.paste(text);
+          return;
+        } catch (err) {
+          // fallback to raw send below
+        }
+      }
       const sid = sshIdRef.current;
       if (sid) {
         invokeSafe("send_ssh_input", { sessionId: sid, input: text }).catch(
@@ -524,7 +607,7 @@ export const TerminalPane = memo(function TerminalPane({
         const pr = promptRef.current;
         if (pr.stage === "user") {
           pr.user += text;
-          term.write(text);
+          termRef.current?.write(text);
         } else {
           pr.pass += text;
         }
@@ -682,19 +765,30 @@ export const TerminalPane = memo(function TerminalPane({
         );
         return;
       }
+      // Stop any previous session and remove its listener BEFORE clearing
+      // the terminal. unlistenRef may still be null if the listenSafe()
+      // promise never resolved (fast auth failure race); the per-sshId guard
+      // in the output handler handles that case.
       if (sshIdRef.current) {
         invokeSafe("stop_ssh_session", { sessionId: sshIdRef.current }).catch(
           () => {},
         );
-        if (unlistenRef.current) unlistenRef.current();
+        if (unlistenRef.current) {
+          unlistenRef.current();
+        }
         sshIdRef.current = null;
+        unlistenRef.current = null;
       }
+      // Clear stale prompt state so a previous "login as:" prompt doesn't
+      // intercept keystrokes on the new connection.
+      promptRef.current = null;
       setCurrentCwd("~");
       setConnecting(true);
       try {
         fitRef.current?.fit();
       } catch (_) {}
-      term.clear();
+      // Full reset: clears viewport + scrollback so reconnect starts clean.
+      term.reset();
       const connectUser = overrideUser || pane.sessionEntry.user;
       const connectPass =
         overridePass || pane.sessionEntry.pass || password || "";
@@ -717,7 +811,29 @@ export const TerminalPane = memo(function TerminalPane({
           setConnecting(false);
           onConnected(pane.tabId, sshId);
           listenSafe(`ssh-output-${sshId}`, (event) => {
+            // Discard events from a session that is no longer current.
+            // This handles the race where auth fails before the listenSafe()
+            // promise resolves, leaving unlistenRef.current null when
+            // the user reconnects, so the old listener survives briefly.
+            if (sshIdRef.current !== sshId) return;
             const payload = event.payload as SshOutputPayload;
+
+            // Detect session termination signals from the Rust backend.
+            // "[disconnected]" is always the final event emitted; clean up
+            // refs and show the credential prompt so reconnect starts fresh.
+            if (payload.output === "[disconnected]") {
+              sshIdRef.current = null;
+              if (unlistenRef.current) {
+                unlistenRef.current();
+                unlistenRef.current = null;
+              }
+              term.write("\r\n\x1b[90m[disconnected]\x1b[0m\r\n");
+              term.write("\r\nlogin as: ");
+              promptRef.current = { stage: "user", user: "", pass: "" };
+              onDisconnected(pane.tabId);
+              return;
+            }
+
             if (waitingForPwdRef.current) {
               pwdResponseRef.current += payload.output;
               const lines = pwdResponseRef.current.split(/[\r\n]+/);
@@ -752,10 +868,8 @@ export const TerminalPane = memo(function TerminalPane({
         .catch((err) => {
           setConnecting(false);
           term.write(`\r\n\x1b[31m✖ Error: ${String(err)}\x1b[0m\r\n`);
-          if (overridePass !== undefined) {
-            term.write(`\r\nlogin as: `);
-            promptRef.current = { stage: "user", user: "", pass: "" };
-          }
+          term.write(`\r\nlogin as: `);
+          promptRef.current = { stage: "user", user: "", pass: "" };
           onDisconnected(pane.tabId);
         });
     },
@@ -770,10 +884,33 @@ export const TerminalPane = memo(function TerminalPane({
     if (wrapperRef.current) {
       const el = wrapperRef.current as HTMLDivElement & {
         __connect?: () => void;
+        __reconnect?: () => void;
         __disconnect?: () => void;
         __fit?: () => void;
       };
       el.__connect = connect;
+      // __reconnect: stop any active session, reset terminal, show fresh
+      // credential prompt — user types new user/pass from scratch.
+      el.__reconnect = () => {
+        const term = termRef.current;
+        if (!term) return;
+        if (sshIdRef.current) {
+          invokeSafe("stop_ssh_session", { sessionId: sshIdRef.current }).catch(
+            () => {},
+          );
+          if (unlistenRef.current) {
+            unlistenRef.current();
+            unlistenRef.current = null;
+          }
+          sshIdRef.current = null;
+        }
+        setConnecting(false);
+        onDisconnected(pane.tabId);
+        promptRef.current = null;
+        term.reset();
+        term.write("\r\nlogin as: ");
+        promptRef.current = { stage: "user", user: "", pass: "" };
+      };
       el.__fit = () => {
         try {
           fitRef.current?.fit();
