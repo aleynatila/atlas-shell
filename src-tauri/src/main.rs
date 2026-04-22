@@ -257,14 +257,27 @@ fn upload_file_sftp(
     remote_dir: String,
 ) -> Result<(), String> {
     thread::spawn(move || {
-        // Fallback chain: rsync (fastest, key-auth only) → SCP → SFTP
+        // Fallback chain: rsync (fastest, delta) → SCP (fast) → SFTP (safe)
         let result = if let Some(ref kp) = key_path {
-            do_rsync_upload(
+            let rsync_result = do_rsync_upload(
                 &app_handle, &transfer_id, &host, port, &user, kp, &local_path, &remote_dir,
-            ).or_else(|_| do_scp_upload(
-                &app_handle, &transfer_id, &host, port, &user, &pass,
-                Some(kp.as_str()), &local_path, &remote_dir,
-            ))
+            );
+            match rsync_result {
+                Ok(()) => Ok(()),
+                Err(ref e) if e.starts_with("transient:") => {
+                    // One retry for network blips before falling to SCP
+                    do_rsync_upload(
+                        &app_handle, &transfer_id, &host, port, &user, kp, &local_path, &remote_dir,
+                    ).or_else(|_| do_scp_upload(
+                        &app_handle, &transfer_id, &host, port, &user, &pass,
+                        Some(kp.as_str()), &local_path, &remote_dir,
+                    ))
+                }
+                Err(_) => do_scp_upload(
+                    &app_handle, &transfer_id, &host, port, &user, &pass,
+                    Some(kp.as_str()), &local_path, &remote_dir,
+                ),
+            }
         } else {
             do_scp_upload(
                 &app_handle, &transfer_id, &host, port, &user, &pass,
@@ -293,7 +306,12 @@ fn upload_file_sftp(
 
 /// Parse a rsync --info=progress2 progress line.
 /// Example: "    1,048,576  50%  10.50MB/s    0:00:01"
+/// Ignores info lines like "sending incremental file list" that lack '%'.
 fn parse_rsync_progress_line(line: &str) -> Option<(u64, u8)> {
+    // Only parse lines that contain a percentage marker
+    if !line.contains('%') {
+        return None;
+    }
     let parts: Vec<&str> = line.trim().split_whitespace().collect();
     if parts.len() >= 2 {
         let bytes = parts[0].replace(',', "").parse::<u64>().ok()?;
@@ -301,6 +319,18 @@ fn parse_rsync_progress_line(line: &str) -> Option<(u64, u8)> {
         return Some((bytes, pct));
     }
     None
+}
+
+/// Classify rsync errors so we can decide whether to retry or immediately fall back.
+/// exit code 127 = command not found (no rsync on remote)
+/// exit code 255 = ssh failure (auth/network)
+/// exit code 11/23 = partial transfer → transient, worth retrying
+fn is_rsync_transient_error(stderr: &str, code: i32) -> bool {
+    // Partial transfer or "vanished" source file — transient
+    if code == 23 || code == 24 { return true; }
+    // Network-level errors
+    if stderr.contains("connection unexpectedly closed") || stderr.contains("timed out") { return true; }
+    false
 }
 
 /// Rsync upload using bundled cwRsync (requires key-based SSH auth).
@@ -319,8 +349,21 @@ fn do_rsync_upload(
     use std::process::{Command, Stdio};
 
     let resource_dir = app.path().resource_dir().map_err(|e| e.to_string())?;
-    let rsync_exe = resource_dir.join("bin").join("rsync.exe");
-    let ssh_exe = resource_dir.join("bin").join("ssh.exe");
+    // Look for binaries in resource_dir/bin/ first (production bundle),
+    // then next to the executable (dev / manual install).
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_default();
+    let find_bin = |name: &str| -> std::path::PathBuf {
+        let a = resource_dir.join("bin").join(name);
+        if a.exists() { return a; }
+        let b = exe_dir.join("bin").join(name);
+        if b.exists() { return b; }
+        a // return default so the exists() check below gives a clear error
+    };
+    let rsync_exe = find_bin("rsync.exe");
+    let ssh_exe   = find_bin("ssh.exe");
 
     if !rsync_exe.exists() {
         return Err("rsync.exe not bundled".into());
@@ -328,19 +371,23 @@ fn do_rsync_upload(
 
     let total = std::fs::metadata(local_path).map_err(|e| e.to_string())?.len();
 
-    // Build -e ssh command; use bundled ssh.exe + forward-slash paths for cygwin
+    // Build -e ssh command.
+    // CRITICAL: quote the ssh binary path so spaces in resource_dir don't break the shell.
+    // Use forward-slash paths — cwRsync runs in a cygwin layer and rejects backslashes.
     let ssh_bin = if ssh_exe.exists() {
-        ssh_exe.to_string_lossy().replace('\\', "/").to_string()
+        // Wrap in quotes to handle paths with spaces
+        format!("'{}'", ssh_exe.to_string_lossy().replace('\\', "/"))
     } else {
         "ssh".to_string()
     };
     let key_fwd = key_path.replace('\\', "/");
     let ssh_cmd = format!(
-        "{} -i {} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p {}",
+        "{} -i '{}' -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p {}",
         ssh_bin, key_fwd, port
     );
     let remote_target = format!("{}@{}:{}/", user, host, remote_dir.trim_end_matches('/'));
     let bin_dir = resource_dir.join("bin").to_string_lossy().to_string();
+    // Include bin/ on PATH so cygwin1.dll is found by rsync.exe at runtime
     let path_env = format!("{};{}", bin_dir, std::env::var("PATH").unwrap_or_default());
 
     let mut child = Command::new(&rsync_exe)
@@ -349,6 +396,8 @@ fn do_rsync_upload(
             "--info=progress2",
             "--partial",
             "--inplace",
+            "--no-inc-recursive",  // reduce overhead: don't scan incrementally
+            "--whole-file",        // faster on LAN/fast links (skip delta check)
             "-e", &ssh_cmd,
             local_path,
             &remote_target,
@@ -397,7 +446,16 @@ fn do_rsync_upload(
         if let Some(ref mut se) = stderr_pipe {
             let _ = se.read_to_string(&mut stderr_out);
         }
-        return Err(format!("rsync ({}): {}", status, stderr_out.trim()));
+        let code = status.code().unwrap_or(-1);
+        // For transient errors (partial transfer, connection drop) bubble up a
+        // distinct marker so the caller can decide to retry vs fall through to SCP.
+        // For permanent errors (127 = no rsync, 255 = ssh auth) we just fail fast.
+        let msg = format!("rsync ({}): {}", code, stderr_out.trim());
+        if is_rsync_transient_error(&stderr_out, code) {
+            // One retry attempt before giving up
+            return Err(format!("transient:{}", msg));
+        }
+        return Err(msg);
     }
 
     let filename = Path::new(local_path).file_name().unwrap_or_default().to_string_lossy();
@@ -547,6 +605,8 @@ fn do_scp_upload(
 ) -> Result<(), String> {
     use std::fs;
     let tcp = TcpStream::connect(format!("{}:{}", host, port)).map_err(|e| e.to_string())?;
+    // Disable Nagle's algorithm: reduces latency for the many small SCP protocol writes
+    tcp.set_nodelay(true).ok();
     let mut sess = Session::new().map_err(|e| e.to_string())?;
     sess.set_tcp_stream(tcp);
     sess.handshake().map_err(|e| e.to_string())?;
@@ -582,8 +642,8 @@ fn do_scp_upload(
     let scp_header = format!("C0644 {} {}\n", total, filename);
     channel.write_all(scp_header.as_bytes()).map_err(|e| e.to_string())?;
 
-    // Send file data in 1MB chunks (SCP has less overhead than SFTP)
-    const CHUNK_SIZE: usize = 1048576;
+    // 4MB chunks: SCP has very little per-write overhead vs SFTP, larger chunks = fewer round-trips
+    const CHUNK_SIZE: usize = 4194304;
     const PROGRESS_INTERVAL: usize = 5242880;
     
     let mut offset = 0usize;

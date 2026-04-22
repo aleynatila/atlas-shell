@@ -2,16 +2,38 @@ import { Upload, X } from "lucide-react";
 import { memo, useState } from "react";
 import type { TransferMap } from "../types";
 
-const PROTOCOL_STYLES: Record<string, { label: string; className: string }> = {
-  rsync: { label: "rsync", className: "text-purple-400 border-purple-400/40" },
-  scp:   { label: "scp",   className: "text-hx-neon border-hx-neon/40" },
-  sftp:  { label: "sftp",  className: "text-hx-dim border-hx-border" },
+const PROTOCOL_STYLES: Record<
+  string,
+  { label: string; title: string; className: string }
+> = {
+  rsync: {
+    label: "rsync",
+    title: "Fast sync (rsync) — delta transfer",
+    className: "text-purple-400 border-purple-400/40",
+  },
+  scp: {
+    label: "scp",
+    title: "Direct transfer (SCP) — raw protocol",
+    className: "text-hx-neon border-hx-neon/40",
+  },
+  sftp: {
+    label: "sftp",
+    title: "Safe fallback (SFTP)",
+    className: "text-hx-dim border-hx-border",
+  },
 };
 
 function ProtocolBadge({ protocol }: { protocol: string }) {
-  const style = PROTOCOL_STYLES[protocol] ?? { label: protocol, className: "text-hx-dim border-hx-border" };
+  const style = PROTOCOL_STYLES[protocol] ?? {
+    label: protocol,
+    title: protocol,
+    className: "text-hx-dim border-hx-border",
+  };
   return (
-    <span className={`text-[9px] font-mono uppercase border rounded px-1 py-px shrink-0 ${style.className}`}>
+    <span
+      title={style.title}
+      className={`text-[9px] font-mono uppercase border rounded px-1 py-px shrink-0 cursor-help ${style.className}`}
+    >
       {style.label}
     </span>
   );
@@ -155,9 +177,7 @@ export const SftpToast = memo(function SftpToast({
                         {t.name}
                       </span>
                       <div className="flex items-center gap-1.5 shrink-0">
-                        {t.protocol && (
-                          <ProtocolBadge protocol={t.protocol} />
-                        )}
+                        {t.protocol && <ProtocolBadge protocol={t.protocol} />}
                         <button
                           onClick={() => onDismiss(id)}
                           className="text-hx-dim hover:text-hx-text transition-colors"
