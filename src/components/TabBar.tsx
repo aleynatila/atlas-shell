@@ -1,4 +1,4 @@
-import { appWindow } from "@tauri-apps/api/window";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
     Columns2,
     ExternalLink,
@@ -362,7 +362,7 @@ export const TabBar = memo(function TabBar({
         <div className="shrink-0 flex items-center">
           <button
             onMouseDown={(e) => e.stopPropagation()}
-            onClick={() => appWindow.minimize()}
+            onClick={() => getCurrentWindow().minimize()}
             className="flex items-center justify-center w-11 h-full text-white/75 hover:text-white hover:bg-white/10 transition-colors"
             title="Minimize"
           >
@@ -370,7 +370,7 @@ export const TabBar = memo(function TabBar({
           </button>
           <button
             onMouseDown={(e) => e.stopPropagation()}
-            onClick={() => appWindow.toggleMaximize()}
+            onClick={() => getCurrentWindow().toggleMaximize()}
             className="flex items-center justify-center w-11 h-full text-white/75 hover:text-white hover:bg-white/10 transition-colors"
             title="Maximize"
           >
@@ -378,7 +378,7 @@ export const TabBar = memo(function TabBar({
           </button>
           <button
             onMouseDown={(e) => e.stopPropagation()}
-            onClick={() => appWindow.close()}
+            onClick={() => getCurrentWindow().close()}
             className="flex items-center justify-center w-11 h-full text-white/75 hover:text-white hover:bg-red-500/80 transition-colors"
             title="Close"
           >

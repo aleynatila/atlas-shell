@@ -30,7 +30,10 @@ export const StatusBar = memo(function StatusBar({
             CONNECTED
           </span>
           <span>
-            {activeTab.sessionEntry.user}@{activeTab.sessionEntry.host}
+            {activeTab.sessionEntry.user
+              ? `${activeTab.sessionEntry.user}@`
+              : ""}
+            {activeTab.sessionEntry.host}
           </span>
           <span>
             {activeTab.sessionEntry.keyPath ? "KEY AUTH" : "PASS AUTH"}

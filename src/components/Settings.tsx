@@ -1,11 +1,7 @@
 import { getVersion as getAppVersion } from "@tauri-apps/api/app";
-import { relaunch } from "@tauri-apps/api/process";
-import { open as shellOpen } from "@tauri-apps/api/shell";
-import {
-  checkUpdate,
-  installUpdate,
-  onUpdaterEvent,
-} from "@tauri-apps/api/updater";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { open as shellOpen } from "@tauri-apps/plugin-shell";
+import { check as checkUpdate } from "@tauri-apps/plugin-updater";
 import {
   Download,
   Edit2,
@@ -393,7 +389,8 @@ export function Settings({
                         {s.label}
                       </div>
                       <div className="text-[10px] text-hx-muted font-mono">
-                        {s.user}@{s.host}:{s.port}
+                        {s.user ? `${s.user}@` : ""}
+                        {s.host}:{s.port}
                       </div>
                     </div>
                     <button
@@ -1261,7 +1258,7 @@ export function Settings({
               </p>
               <div className="border-t border-hx-border pt-4 space-y-2 text-[10px] font-mono">
                 {[
-                  ["Framework", "Tauri v1 + React 18"],
+                  ["Framework", "Tauri v2 + React 18"],
                   ["Language", "TypeScript + Rust"],
                   ["Terminal", "xterm.js"],
                   ["Protocol", "SSHv2 (libssh2)"],
@@ -1377,7 +1374,7 @@ function UpdatesTab({
   const updatePermissionAsked = generalSettings.updatePermissionAsked ?? false;
   const autoCheck = generalSettings.autoCheckUpdates ?? false;
   const hasTauriRuntime =
-    typeof window !== "undefined" && "__TAURI_IPC__" in window;
+    typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
   useEffect(() => {
     let mounted = true;
@@ -1409,22 +1406,20 @@ function UpdatesTab({
     setInstalling(true);
     setInstallStatus("Downloading signed update package...");
     setError(null);
-    let unlisten: (() => void) | undefined;
     try {
-      unlisten = await onUpdaterEvent(({ error: updaterError, status }) => {
-        if (updaterError) {
-          setError(`Update failed: ${updaterError}`);
-          return;
-        }
-
-        if (status === "PENDING") {
+      const update = await checkUpdate();
+      if (!update) {
+        setError("No update available.");
+        setInstalling(false);
+        return;
+      }
+      await update.downloadAndInstall((event: { event: string }) => {
+        if (event.event === "Started") {
           setInstallStatus("Downloading signed update package...");
-        } else if (status === "DONE") {
+        } else if (event.event === "Finished") {
           setInstallStatus("Update installed. Restarting Atlas...");
         }
       });
-
-      await installUpdate();
       setConfirmInstall(false);
       setUpdateAvailable(false);
       setLatestRelease((current) =>
@@ -1438,7 +1433,6 @@ function UpdatesTab({
       setError(`Update failed: ${String(err)}`);
       setInstallStatus(null);
     } finally {
-      unlisten?.();
       setInstalling(false);
     }
   }, [currentVersion, hasTauriRuntime, latestRelease]);
@@ -1458,23 +1452,17 @@ function UpdatesTab({
     setInstallStatus(null);
     try {
       const update = await checkUpdate();
-      const manifest = update.manifest as
-        | (typeof update.manifest & {
-            notes?: string;
-            pub_date?: string;
-          })
-        | undefined;
       const manifestVersion = normalizeVersion(
-        manifest?.version || currentVersion,
+        update?.version || currentVersion,
       );
       const effectiveShouldUpdate =
         compareVersions(manifestVersion, currentVersion) > 0;
-      const info: UpdateInfo = manifest
+      const info: UpdateInfo = update
         ? {
             version: manifestVersion,
             name: `v${manifestVersion}`,
-            body: manifest.body || manifest.notes || "",
-            publishedAt: normalizePublishedAt(manifest.date, manifest.pub_date),
+            body: update.body || "",
+            publishedAt: normalizePublishedAt(update.date, undefined),
             htmlUrl: RELEASES_URL,
             downloadUrl: null,
           }
@@ -1944,6 +1932,38 @@ export const EditSessionSidebar = memo(function EditSessionSidebar({
       </div>
       {/* Sidebar body */}
       <div className="px-4 py-4 space-y-3 flex-1">
+        {[
+          {
+            label: "Session Name",
+            key: "label" as const,
+            type: "text",
+          },
+          {
+            label: "Host / IP",
+            key: "host" as const,
+            type: "text",
+          },
+          {
+            label: "Port",
+            key: "port" as const,
+            type: "text",
+          },
+        ].map(({ label, key, type }) => (
+          <div key={key}>
+            <label className="block text-[10px] font-mono uppercase tracking-widest text-hx-neon/60 mb-1">
+              {label}
+            </label>
+            <input
+              type={type}
+              placeholder=""
+              value={String(editForm[key])}
+              onChange={(e) =>
+                setEditForm((f) => ({ ...f, [key]: e.target.value }))
+              }
+              className="hx-input w-full bg-hx-bg border border-hx-border px-2 py-1.5 text-xs"
+            />
+          </div>
+        ))}
         {credentials.length > 0 && (
           <div>
             <label className="block text-[10px] font-mono uppercase tracking-widest text-hx-neon/60 mb-1">
@@ -1966,7 +1986,7 @@ export const EditSessionSidebar = memo(function EditSessionSidebar({
               <option value="">— none —</option>
               {credentials.map((c) => (
                 <option key={c.id} value={c.id}>
-                  {c.label} ({c.user})
+                  {c.label}
                 </option>
               ))}
             </select>
@@ -1974,63 +1994,42 @@ export const EditSessionSidebar = memo(function EditSessionSidebar({
         )}
         {[
           {
-            label: "Session Name",
-            key: "label" as const,
-            placeholder: "My Server",
-            type: "text",
-          },
-          {
-            label: "Host / IP",
-            key: "host" as const,
-            placeholder: "192.168.1.1",
-            type: "text",
-          },
-          {
-            label: "Port",
-            key: "port" as const,
-            placeholder: "22",
-            type: "text",
-          },
-          {
             label: "Username",
             key: "user" as const,
-            placeholder: "root",
-            type: "text",
-          },
-          {
-            label: "Group",
-            key: "group" as const,
-            placeholder: "production",
             type: "text",
           },
           {
             label: "Key Path",
             key: "keyPath" as const,
-            placeholder: "/home/.ssh/id_rsa",
             type: "text",
           },
           {
             label: "Password",
             key: "pass" as const,
-            placeholder: "optional",
             type: "password",
           },
-        ].map(({ label, key, placeholder, type }) => (
-          <div key={key}>
-            <label className="block text-[10px] font-mono uppercase tracking-widest text-hx-neon/60 mb-1">
-              {label}
-            </label>
-            <input
-              type={type}
-              placeholder={placeholder}
-              value={String(editForm[key])}
-              onChange={(e) =>
-                setEditForm((f) => ({ ...f, [key]: e.target.value }))
-              }
-              className="hx-input w-full bg-hx-bg border border-hx-border px-2 py-1.5 text-xs"
-            />
-          </div>
-        ))}
+        ]
+          .filter(({ key }) =>
+            editForm.credentialId && (key === "user" || key === "pass")
+              ? false
+              : true,
+          )
+          .map(({ label, key, type }) => (
+            <div key={key}>
+              <label className="block text-[10px] font-mono uppercase tracking-widest text-hx-neon/60 mb-1">
+                {label}
+              </label>
+              <input
+                type={type}
+                placeholder=""
+                value={String(editForm[key])}
+                onChange={(e) =>
+                  setEditForm((f) => ({ ...f, [key]: e.target.value }))
+                }
+                className="hx-input w-full bg-hx-bg border border-hx-border px-2 py-1.5 text-xs"
+              />
+            </div>
+          ))}
         <div>
           <label className="block text-[10px] font-mono uppercase tracking-widest text-hx-neon/60 mb-2">
             Accent Color

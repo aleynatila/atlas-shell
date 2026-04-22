@@ -1,5 +1,5 @@
-import { invoke } from "@tauri-apps/api/tauri";
-import { WebviewWindow } from "@tauri-apps/api/window";
+import { invoke } from "@tauri-apps/api/core";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import {
     useCallback,
     useDeferredValue,
@@ -477,7 +477,8 @@ function App() {
 
   const connectPane = useCallback((tabId: string) => {
     const el = paneRefs.current[tabId];
-    if (el) (el as HTMLDivElement & { __connect?: () => void }).__connect?.();
+    if (el)
+      (el as HTMLDivElement & { __reconnect?: () => void }).__reconnect?.();
   }, []);
 
   const disconnectSplitPane = useCallback((tabId: string) => {
@@ -518,8 +519,8 @@ function App() {
         }
       }
     };
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
+    window.addEventListener("keydown", handleKey, true);
+    return () => window.removeEventListener("keydown", handleKey, true);
   }, [connectPane]);
 
   // ── SSH callbacks ──

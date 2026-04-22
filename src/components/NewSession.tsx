@@ -58,6 +58,53 @@ export const NewSession = memo(function NewSession({
           </h2>
         </div>
         <div className="space-y-3">
+          {/* Session Name */}
+          <div>
+            <label className="block text-[10px] font-mono uppercase tracking-widest text-hx-neon/60 mb-1.5">
+              Session Name
+            </label>
+            <input
+              type="text"
+              placeholder=""
+              value={form.label}
+              onChange={(e) =>
+                setForm((f) => ({ ...f, label: e.target.value }))
+              }
+              className="hx-input w-full bg-hx-bg border border-hx-border px-3 py-2 text-xs"
+            />
+          </div>
+          {/* Host / IP */}
+          <div>
+            <label className="block text-[10px] font-mono uppercase tracking-widest text-hx-neon/60 mb-1.5">
+              Host / IP
+            </label>
+            <input
+              type="text"
+              placeholder=""
+              value={form.host}
+              onChange={(e) => setForm((f) => ({ ...f, host: e.target.value }))}
+              className="hx-input w-full bg-hx-bg border border-hx-border px-3 py-2 text-xs"
+            />
+          </div>
+          {/* Port */}
+          <div>
+            <label className="block text-[10px] font-mono uppercase tracking-widest text-hx-neon/60 mb-1.5">
+              Port
+            </label>
+            <input
+              type="text"
+              placeholder=""
+              value={String(form.port)}
+              onChange={(e) =>
+                setForm((f) => ({
+                  ...f,
+                  port: e.target.value as unknown as number,
+                }))
+              }
+              className="hx-input w-full bg-hx-bg border border-hx-border px-3 py-2 text-xs"
+            />
+          </div>
+          {/* Credential dropdown — between Port and Username */}
           {credentials.length > 0 && (
             <div>
               <label className="block text-[10px] font-mono uppercase tracking-widest text-hx-neon/60 mb-1.5">
@@ -77,74 +124,64 @@ export const NewSession = memo(function NewSession({
                 }}
                 className="hx-input w-full bg-hx-bg border border-hx-border px-3 py-2 text-xs font-mono"
               >
-                <option value="">— none (enter manually below) —</option>
+                <option value="">— none —</option>
                 {credentials.map((c) => (
                   <option key={c.id} value={c.id}>
-                    {c.label} ({c.user})
+                    {c.label}
                   </option>
                 ))}
               </select>
             </div>
           )}
-          {[
-            {
-              label: "Session Name",
-              key: "label" as const,
-              placeholder: "My Server",
-              type: "text",
-            },
-            {
-              label: "Host / IP",
-              key: "host" as const,
-              placeholder: "192.168.1.1",
-              type: "text",
-            },
-            {
-              label: "Port",
-              key: "port" as const,
-              placeholder: "22",
-              type: "text",
-            },
-            {
-              label: "Username",
-              key: "user" as const,
-              placeholder: "root",
-              type: "text",
-            },
-            {
-              label: "Group (optional)",
-              key: "group" as const,
-              placeholder: "production",
-              type: "text",
-            },
-            {
-              label: "Private Key Path (optional)",
-              key: "keyPath" as const,
-              placeholder: "/home/user/.ssh/id_rsa",
-              type: "text",
-            },
-            {
-              label: "Password (optional)",
-              key: "pass" as const,
-              placeholder: "Leave blank to enter later",
-              type: "password",
-            },
-          ].map(({ label, key, placeholder, type }) => (
-            <div key={key}>
+          {/* Username — hidden when credential selected */}
+          {!form.credentialId && (
+            <div>
               <label className="block text-[10px] font-mono uppercase tracking-widest text-hx-neon/60 mb-1.5">
-                {label}
+                Username
               </label>
               <input
-                type={type}
-                placeholder={placeholder}
-                value={String(form[key])}
+                type="text"
+                placeholder=""
+                value={form.user}
                 onChange={(e) =>
-                  setForm((f) => ({ ...f, [key]: e.target.value }))
+                  setForm((f) => ({ ...f, user: e.target.value }))
                 }
                 className="hx-input w-full bg-hx-bg border border-hx-border px-3 py-2 text-xs"
               />
             </div>
-          ))}
+          )}
+          {/* Key Path */}
+          <div>
+            <label className="block text-[10px] font-mono uppercase tracking-widest text-hx-neon/60 mb-1.5">
+              Private Key Path (optional)
+            </label>
+            <input
+              type="text"
+              placeholder=""
+              value={form.keyPath}
+              onChange={(e) =>
+                setForm((f) => ({ ...f, keyPath: e.target.value }))
+              }
+              className="hx-input w-full bg-hx-bg border border-hx-border px-3 py-2 text-xs"
+            />
+          </div>
+          {/* Password — hidden when credential selected */}
+          {!form.credentialId && (
+            <div>
+              <label className="block text-[10px] font-mono uppercase tracking-widest text-hx-neon/60 mb-1.5">
+                Password (optional)
+              </label>
+              <input
+                type="password"
+                placeholder=""
+                value={form.pass}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, pass: e.target.value }))
+                }
+                className="hx-input w-full bg-hx-bg border border-hx-border px-3 py-2 text-xs"
+              />
+            </div>
+          )}
           <div>
             <label className="block text-[10px] font-mono uppercase tracking-widest text-hx-neon/60 mb-2">
               Accent Color
