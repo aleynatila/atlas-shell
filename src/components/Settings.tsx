@@ -1451,31 +1451,35 @@ function UpdatesTab({
     setError(null);
     setInstallStatus(null);
     try {
-      // Fetch latest.json directly — bypasses Tauri plugin deserialization
-      // which crashes when signature field is null instead of a string.
-      const res = await fetch(
-        "https://github.com/aleynatila/atlas-shell/releases/latest/download/latest.json",
-        { cache: "no-store" },
-      );
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const manifest = (await res.json()) as {
-        version?: string;
-        notes?: string;
-        pub_date?: string;
-      };
-      const manifestVersion = normalizeVersion(
-        manifest.version || currentVersion,
-      );
-      const effectiveShouldUpdate =
-        compareVersions(manifestVersion, currentVersion) > 0;
-      const info: UpdateInfo = {
-        version: manifestVersion,
-        name: `v${manifestVersion}`,
-        body: manifest.notes || "",
-        publishedAt: normalizePublishedAt(manifest.pub_date),
-        htmlUrl: RELEASES_URL,
-        downloadUrl: null,
-      };
+      // Use the Tauri updater plugin (routes through Rust, no CORS/WebView restrictions).
+      // check() returns null when no update is available (current === latest).
+      const update = await checkUpdate();
+      let info: UpdateInfo;
+      let effectiveShouldUpdate: boolean;
+
+      if (update) {
+        // A newer version is available
+        effectiveShouldUpdate = true;
+        info = {
+          version: normalizeVersion(update.version),
+          name: `v${normalizeVersion(update.version)}`,
+          body: update.body || "",
+          publishedAt: normalizePublishedAt(update.date),
+          htmlUrl: RELEASES_URL,
+          downloadUrl: null,
+        };
+      } else {
+        // Already on latest version
+        effectiveShouldUpdate = false;
+        info = {
+          version: currentVersion,
+          name: `v${currentVersion}`,
+          body: "",
+          publishedAt: "",
+          htmlUrl: RELEASES_URL,
+          downloadUrl: null,
+        };
+      }
 
       setUpdateAvailable(effectiveShouldUpdate);
       setLatestRelease(info);
