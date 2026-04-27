@@ -1,0 +1,11 @@
+{
+  "version": "0.4.2",
+  "notes": "Atlas v0.4.2 - SCP transfer instant feedback, Connecting... state, 512KB progress interval",
+  "pub_date": "2026-04-27T13:18:05Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUL05IZXhDUnYzMVRpSXJ6Smd0VGR3N1JjZm9mWVZuNWVzZGg4VjJxSWZ1M1N4QVlWdXNsY3diQkxIbkZROGZhTlBjTEhiQUNnNUNxOS9hRVJwTSsvNUpVdk8ycEpoMEFFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc3Mjk1ODI1CWZpbGU6YXRsYXNfMC40LjJfeDY0LXNldHVwLmV4ZQpacGVMUVJXdGh6bVpGd2w4T2ZCZlVtcmFJMkJ2d2pqVEJnN3BzUjlxRTZ1NzBZbTdBUGNRK2Nzazl0RTBIM29NNUp3S0IzQld6U1Faa2FIR0sxdlFDdz09Cg==",
+      "url": "https://github.com/aleynatila/atlas-shell/releases/download/v0.4.2/atlas_0.4.2_x64-setup.exe"
+    }
+  }
+}
