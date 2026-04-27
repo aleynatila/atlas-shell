@@ -269,6 +269,16 @@ fn upload_file_sftp(
     local_path: String,
     remote_dir: String,
 ) -> Result<(), String> {
+    // Emit immediately so the UI registers the transfer before the thread even starts
+    let _ = app_handle.emit("sftp-progress", SftpProgress {
+        id: transfer_id.clone(),
+        bytes_sent: 0,
+        total: 0,
+        done: false,
+        error: None,
+        remote_path: None,
+        protocol: "scp".to_string(),
+    });
     thread::spawn(move || {
         let result = do_scp_upload(
             &app_handle, &transfer_id, &host, port, &user, &pass,
@@ -345,9 +355,20 @@ fn do_scp_upload(
     let scp_header = format!("C0644 {} {}\n", total, filename);
     channel.write_all(scp_header.as_bytes()).map_err(|e| e.to_string())?;
 
+    // Emit 0% immediately so the UI shows the transfer as started
+    let _ = app.emit("sftp-progress", SftpProgress {
+        id: transfer_id.to_string(),
+        bytes_sent: 0,
+        total,
+        done: false,
+        error: None,
+        remote_path: None,
+        protocol: "scp".to_string(),
+    });
+
     // Stream file in 4MB chunks — avoids loading the entire file into RAM
     const CHUNK_SIZE: usize = 4194304;
-    const PROGRESS_INTERVAL: u64 = 5242880;
+    const PROGRESS_INTERVAL: u64 = 524288; // emit every 512KB
 
     let file = File::open(local_path).map_err(|e| e.to_string())?;
     let mut reader = BufReader::with_capacity(CHUNK_SIZE, file);

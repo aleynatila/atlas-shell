@@ -116,7 +116,9 @@ export const SftpToast = memo(function SftpToast({
                     ✓ {t.remoteDir || "done"}
                   </span>
                 ) : (
-                  <span className="text-hx-neon shrink-0">{t.progress}%</span>
+                  <span className="text-hx-neon shrink-0">
+                    {t.progress === 0 ? "…" : `${t.progress}%`}
+                  </span>
                 )}
               </div>
             ))}
@@ -209,12 +211,12 @@ export const SftpToast = memo(function SftpToast({
                       <div className="flex items-center gap-2">
                         <div className="flex-1 h-1.5 bg-hx-border rounded overflow-hidden">
                           <div
-                            className="h-full bg-hx-neon transition-all"
-                            style={{ width: `${t.progress}%` }}
+                            className="h-full bg-hx-neon"
+                            style={{ width: `${t.progress}%`, transition: t.progress === 0 ? 'none' : 'width 0.3s ease' }}
                           />
                         </div>
-                        <span className="text-[10px] text-hx-neon font-mono shrink-0">
-                          {t.progress}%
+                        <span className="text-[10px] text-hx-neon font-mono shrink-0 w-16 text-right">
+                          {t.progress === 0 ? "Connecting..." : `${t.progress}%`}
                         </span>
                       </div>
                     )}
