@@ -689,6 +689,7 @@ function App() {
             setEditSelectedColor={setEditSelectedColor}
             updateSession={updateSession}
             openTab={openTab}
+            prefillNewSession={prefillNewSession}
             importStatus={importStatus}
             setImportStatus={setImportStatus}
             darkMode={darkMode}

@@ -10,7 +10,9 @@ import {
     Info,
     Key,
     Play,
+    Plus,
     RefreshCw,
+    Server,
     Trash2,
     X,
 } from "lucide-react";
@@ -66,6 +68,7 @@ interface SettingsProps {
   setEditSelectedColor: (c: string) => void;
   updateSession: () => void;
   openTab: (entry: SessionEntry, autoConnect?: boolean) => void;
+  prefillNewSession: (host: string) => void;
   importStatus: string | null;
   setImportStatus: (s: string | null) => void;
   darkMode: boolean;
@@ -112,6 +115,7 @@ export function Settings({
   setEditSelectedColor,
   updateSession,
   openTab,
+  prefillNewSession,
   importStatus,
   setImportStatus,
   darkMode,
@@ -346,8 +350,8 @@ export function Settings({
                   No sessions saved.
                 </p>
               )}
-              {sessions
-                .filter((s) => {
+              {(() => {
+                const filtered = sessions.filter((s) => {
                   const q = settingsSearch.toLowerCase();
                   return (
                     !q ||
@@ -355,8 +359,35 @@ export function Settings({
                     s.host.toLowerCase().includes(q) ||
                     (s.user || "").toLowerCase().includes(q)
                   );
-                })
-                .map((s) => (
+                });
+                if (sessions.length > 0 && filtered.length === 0 && settingsSearch) {
+                  return (
+                    <div className="flex flex-col items-center justify-center py-8 gap-3">
+                      <div className="relative">
+                        <div
+                          className="w-10 h-10 border border-hx-neon/20 rotate-45 flex items-center justify-center"
+                          style={{ boxShadow: "0 0 12px rgba(0,229,255,0.04)" }}
+                        >
+                          <Server size={14} className="text-hx-dim -rotate-45" />
+                        </div>
+                        <div className="absolute -inset-2 border border-hx-neon/08 rotate-45" />
+                      </div>
+                      <p className="text-hx-muted text-xs font-mono">
+                        No session found for{" "}
+                        <span className="text-hx-text font-bold">"{settingsSearch}"</span>
+                      </p>
+                      <button
+                        onClick={() => prefillNewSession(settingsSearch)}
+                        className="hx-clip-btn flex items-center gap-2 px-3 py-1.5 text-[11px] font-bold uppercase tracking-widest text-hx-neon border border-hx-neon/40 hover:border-hx-neon/80 hover:bg-hx-neon/10 transition-all"
+                        style={{ boxShadow: "0 0 10px rgba(0,229,255,0.08)" }}
+                      >
+                        <Plus size={11} />
+                        Create session for "{settingsSearch}"
+                      </button>
+                    </div>
+                  );
+                }
+                return filtered.map((s) => (
                   <div
                     key={s.id}
                     className={`flex items-center gap-3 p-3 bg-hx-panel border transition-colors cursor-pointer ${
@@ -415,7 +446,8 @@ export function Settings({
                       <Trash2 size={11} />
                     </button>
                   </div>
-                ))}
+                ));
+              })()}
             </div>
           </div>
         )}
