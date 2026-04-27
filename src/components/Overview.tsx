@@ -154,15 +154,15 @@ export const Overview = memo(function Overview({
             </button>
           </div>
         ) : overviewSessions.length === 0 && searchQuery ? (
-          <div className="flex flex-col items-center justify-center h-56 gap-4">
-            <div className="relative">
+          <div className="flex flex-col items-center justify-center py-20 gap-5">
+            <div className="relative p-3">
               <div
                 className="w-14 h-14 border border-hx-neon/20 rotate-45 flex items-center justify-center"
                 style={{ boxShadow: "0 0 16px rgba(0,229,255,0.04)" }}
               >
                 <Server size={17} className="text-hx-dim -rotate-45" />
               </div>
-              <div className="absolute -inset-3 border border-hx-neon/08 rotate-45" />
+              <div className="absolute inset-0 border border-hx-neon/08 rotate-45" />
             </div>
             <p className="text-hx-muted text-sm font-mono">
               No session found for{" "}

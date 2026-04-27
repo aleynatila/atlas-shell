@@ -366,8 +366,8 @@ export function Settings({
                   settingsSearch
                 ) {
                   return (
-                    <div className="flex flex-col items-center justify-center py-8 gap-3">
-                      <div className="relative">
+                    <div className="flex flex-col items-center justify-center py-14 gap-4">
+                      <div className="relative p-2">
                         <div
                           className="w-10 h-10 border border-hx-neon/20 rotate-45 flex items-center justify-center"
                           style={{ boxShadow: "0 0 12px rgba(0,229,255,0.04)" }}
@@ -377,7 +377,7 @@ export function Settings({
                             className="text-hx-dim -rotate-45"
                           />
                         </div>
-                        <div className="absolute -inset-2 border border-hx-neon/08 rotate-45" />
+                        <div className="absolute inset-0 border border-hx-neon/08 rotate-45" />
                       </div>
                       <p className="text-hx-muted text-xs font-mono">
                         No session found for{" "}
