@@ -37,7 +37,7 @@
       "endpoints": [
         "https://github.com/aleynatila/atlas-shell/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY0NjQxRUMzNjRDOEE4Q0EKUldUS3FNaGt3eDVrOUdBczVzUjJ4aWdvMFVRb3JGSGRpaGhCclVzdUtWc09EUlIrbExyY1pLU3MK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ1RjcxQjA5QjE3NzM0RkYKUldUL05IZXhDUnYzMVN4b1pHdW1meUd5RmRld0o5WitvUE9HeW9nQSticmlrRVlwMFBrY2dseTAK",
       "windows": {
         "installMode": "passive"
       }
