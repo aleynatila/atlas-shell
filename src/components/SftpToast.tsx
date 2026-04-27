@@ -6,20 +6,10 @@ const PROTOCOL_STYLES: Record<
   string,
   { label: string; title: string; className: string }
 > = {
-  rsync: {
-    label: "rsync",
-    title: "Fast sync (rsync) — delta transfer",
-    className: "text-purple-400 border-purple-400/40",
-  },
   scp: {
     label: "scp",
-    title: "Direct transfer (SCP) — raw protocol",
+    title: "Direct transfer (SCP)",
     className: "text-hx-neon border-hx-neon/40",
-  },
-  sftp: {
-    label: "sftp",
-    title: "Safe fallback (SFTP)",
-    className: "text-hx-dim border-hx-border",
   },
 };
 
@@ -98,6 +88,11 @@ export const SftpToast = memo(function SftpToast({
 
         {/* Hover expand */}
         <div className="hidden group-hover:flex flex-col gap-2 absolute bottom-full right-0 mb-2 bg-hx-panel border border-hx-border rounded p-3 w-80 shadow-xl max-h-56 overflow-y-auto">
+          {total > 5 && (
+            <span className="text-[9px] text-hx-dim font-mono text-right">
+              +{total - 5} more — click to see all
+            </span>
+          )}
           {Object.entries(transfers)
             .slice(-5)
             .map(([id, t]) => (
@@ -141,7 +136,7 @@ export const SftpToast = memo(function SftpToast({
               <div className="flex items-center gap-2">
                 <Upload size={14} className="text-hx-neon" />
                 <span className="text-xs font-bold tracking-widest uppercase text-hx-neon">
-                  SFTP Transfers
+                  SCP Transfers
                 </span>
               </div>
               <div className="flex items-center gap-2">

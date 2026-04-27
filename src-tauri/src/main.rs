@@ -3,7 +3,7 @@
     windows_subsystem = "windows"
 )]
 
-use ssh2::{OpenFlags, OpenType, Session};
+use ssh2::Session;
 use std::{
     collections::HashMap,
     io::{Read, Write},
@@ -121,6 +121,8 @@ fn start_ssh_session(
                                     let _ = sess.set_keepalive(true, 30);
                                     sess.set_blocking(false);
                                     let mut buf = [0u8; 32768];
+                                    // Incomplete multi-byte UTF-8 sequence carried over from last read
+                                    let mut utf8_remainder: Vec<u8> = Vec::new();
                                     let mut keepalive_timer = std::time::Instant::now();
                                     loop {
                                         // Coalesce consecutive reads into one IPC event to reduce
@@ -131,7 +133,18 @@ fn start_ssh_session(
                                             match channel.read(&mut buf) {
                                                 Ok(n) if n > 0 => {
                                                     got_data = true;
-                                                    combined.push_str(&String::from_utf8_lossy(&buf[..n]));
+                                                    // Prepend any leftover bytes from the previous read
+                                                    let mut raw = utf8_remainder.clone();
+                                                    raw.extend_from_slice(&buf[..n]);
+                                                    utf8_remainder.clear();
+                                                    // Find the largest valid UTF-8 prefix; carry the rest
+                                                    let valid_end = match std::str::from_utf8(&raw) {
+                                                        Ok(_) => raw.len(),
+                                                        Err(e) => e.valid_up_to(),
+                                                    };
+                                                    utf8_remainder.extend_from_slice(&raw[valid_end..]);
+                                                    // SAFETY: valid_end is a valid UTF-8 boundary
+                                                    combined.push_str(unsafe { std::str::from_utf8_unchecked(&raw[..valid_end]) });
                                                 }
                                                 _ => break,
                                             }
@@ -195,7 +208,7 @@ fn start_ssh_session(
             }
         }
 
-        SESS_TX.lock().unwrap().remove(&session_id_clone);
+        if let Ok(mut map) = SESS_TX.lock() { map.remove(&session_id_clone); }
         let _ = app.emit(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: "[disconnected]".into() });
     });
 
@@ -204,7 +217,7 @@ fn start_ssh_session(
 
 #[tauri::command]
 fn send_ssh_input(session_id: String, input: String) -> Result<(), String> {
-    let map = SESS_TX.lock().unwrap();
+    let map = SESS_TX.lock().map_err(|_| "lock poisoned".to_string())?;
     if let Some(tx) = map.get(&session_id) {
         tx.send(InputMessage::Data(input.into_bytes())).map_err(|e| e.to_string())
     } else {
@@ -214,7 +227,7 @@ fn send_ssh_input(session_id: String, input: String) -> Result<(), String> {
 
 #[tauri::command]
 fn resize_pty(session_id: String, cols: u32, rows: u32) -> Result<(), String> {
-    let map = SESS_TX.lock().unwrap();
+    let map = SESS_TX.lock().map_err(|_| "lock poisoned".to_string())?;
     if let Some(tx) = map.get(&session_id) {
         tx.send(InputMessage::Resize(cols, rows)).map_err(|e| e.to_string())
     } else {
@@ -224,7 +237,7 @@ fn resize_pty(session_id: String, cols: u32, rows: u32) -> Result<(), String> {
 
 #[tauri::command]
 fn stop_ssh_session(session_id: String) -> Result<(), String> {
-    let mut map = SESS_TX.lock().unwrap();
+    let mut map = SESS_TX.lock().map_err(|_| "lock poisoned".to_string())?;
     if let Some(tx) = map.remove(&session_id) {
         tx.send(InputMessage::Close).map_err(|e| e.to_string())?;
     }
@@ -257,38 +270,10 @@ fn upload_file_sftp(
     remote_dir: String,
 ) -> Result<(), String> {
     thread::spawn(move || {
-        // Fallback chain: rsync (fastest, delta) → SCP (fast) → SFTP (safe)
-        let result = if let Some(ref kp) = key_path {
-            let rsync_result = do_rsync_upload(
-                &app_handle, &transfer_id, &host, port, &user, kp, &local_path, &remote_dir,
-            );
-            match rsync_result {
-                Ok(()) => Ok(()),
-                Err(ref e) if e.starts_with("transient:") => {
-                    // One retry for network blips before falling to SCP
-                    do_rsync_upload(
-                        &app_handle, &transfer_id, &host, port, &user, kp, &local_path, &remote_dir,
-                    ).or_else(|_| do_scp_upload(
-                        &app_handle, &transfer_id, &host, port, &user, &pass,
-                        Some(kp.as_str()), &local_path, &remote_dir,
-                    ))
-                }
-                Err(_) => do_scp_upload(
-                    &app_handle, &transfer_id, &host, port, &user, &pass,
-                    Some(kp.as_str()), &local_path, &remote_dir,
-                ),
-            }
-        } else {
-            do_scp_upload(
-                &app_handle, &transfer_id, &host, port, &user, &pass,
-                None, &local_path, &remote_dir,
-            )
-        }.or_else(|_| {
-            do_sftp_upload(
-                &app_handle, &transfer_id, &host, port, &user, &pass,
-                key_path.as_deref(), &local_path, &remote_dir,
-            )
-        });
+        let result = do_scp_upload(
+            &app_handle, &transfer_id, &host, port, &user, &pass,
+            key_path.as_deref(), &local_path, &remote_dir,
+        );
         if let Err(e) = result {
             let _ = app_handle.emit("sftp-progress", SftpProgress {
                 id: transfer_id,
@@ -304,294 +289,7 @@ fn upload_file_sftp(
     Ok(())
 }
 
-/// Parse a rsync --info=progress2 progress line.
-/// Example: "    1,048,576  50%  10.50MB/s    0:00:01"
-/// Ignores info lines like "sending incremental file list" that lack '%'.
-fn parse_rsync_progress_line(line: &str) -> Option<(u64, u8)> {
-    // Only parse lines that contain a percentage marker
-    if !line.contains('%') {
-        return None;
-    }
-    let parts: Vec<&str> = line.trim().split_whitespace().collect();
-    if parts.len() >= 2 {
-        let bytes = parts[0].replace(',', "").parse::<u64>().ok()?;
-        let pct = parts[1].trim_end_matches('%').parse::<u8>().ok()?;
-        return Some((bytes, pct));
-    }
-    None
-}
-
-/// Classify rsync errors so we can decide whether to retry or immediately fall back.
-/// exit code 127 = command not found (no rsync on remote)
-/// exit code 255 = ssh failure (auth/network)
-/// exit code 11/23 = partial transfer → transient, worth retrying
-fn is_rsync_transient_error(stderr: &str, code: i32) -> bool {
-    // Partial transfer or "vanished" source file — transient
-    if code == 23 || code == 24 { return true; }
-    // Network-level errors
-    if stderr.contains("connection unexpectedly closed") || stderr.contains("timed out") { return true; }
-    false
-}
-
-/// Rsync upload using bundled cwRsync (requires key-based SSH auth).
-/// Falls back gracefully when rsync.exe is not bundled or remote lacks rsync.
-fn do_rsync_upload(
-    app: &tauri::AppHandle,
-    transfer_id: &str,
-    host: &str,
-    port: u16,
-    user: &str,
-    key_path: &str,
-    local_path: &str,
-    remote_dir: &str,
-) -> Result<(), String> {
-    use tauri::Manager;
-    use std::process::{Command, Stdio};
-
-    let resource_dir = app.path().resource_dir().map_err(|e| e.to_string())?;
-    // Look for binaries in resource_dir/bin/ first (production bundle),
-    // then next to the executable (dev / manual install).
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_default();
-    let find_bin = |name: &str| -> std::path::PathBuf {
-        let a = resource_dir.join("bin").join(name);
-        if a.exists() { return a; }
-        let b = exe_dir.join("bin").join(name);
-        if b.exists() { return b; }
-        a // return default so the exists() check below gives a clear error
-    };
-    let rsync_exe = find_bin("rsync.exe");
-    let ssh_exe   = find_bin("ssh.exe");
-
-    if !rsync_exe.exists() {
-        return Err("rsync.exe not bundled".into());
-    }
-
-    let total = std::fs::metadata(local_path).map_err(|e| e.to_string())?.len();
-
-    // Build -e ssh command.
-    // CRITICAL: quote the ssh binary path so spaces in resource_dir don't break the shell.
-    // Use forward-slash paths — cwRsync runs in a cygwin layer and rejects backslashes.
-    let ssh_bin = if ssh_exe.exists() {
-        // Wrap in quotes to handle paths with spaces
-        format!("'{}'", ssh_exe.to_string_lossy().replace('\\', "/"))
-    } else {
-        "ssh".to_string()
-    };
-    let key_fwd = key_path.replace('\\', "/");
-    let ssh_cmd = format!(
-        "{} -i '{}' -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p {}",
-        ssh_bin, key_fwd, port
-    );
-    let remote_target = format!("{}@{}:{}/", user, host, remote_dir.trim_end_matches('/'));
-    let bin_dir = resource_dir.join("bin").to_string_lossy().to_string();
-    // Include bin/ on PATH so cygwin1.dll is found by rsync.exe at runtime
-    let path_env = format!("{};{}", bin_dir, std::env::var("PATH").unwrap_or_default());
-
-    let mut child = Command::new(&rsync_exe)
-        .args([
-            "-az",
-            "--info=progress2",
-            "--partial",
-            "--inplace",
-            "--no-inc-recursive",  // reduce overhead: don't scan incrementally
-            "--whole-file",        // faster on LAN/fast links (skip delta check)
-            "-e", &ssh_cmd,
-            local_path,
-            &remote_target,
-        ])
-        .env("PATH", &path_env)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("rsync spawn: {}", e))?;
-
-    // Read stdout; rsync uses \r to update progress in-place
-    let mut stdout = child.stdout.take().unwrap();
-    let mut stderr_pipe = child.stderr.take();
-    let mut read_buf = [0u8; 4096];
-    let mut line_buf: Vec<u8> = Vec::new();
-
-    loop {
-        let n = stdout.read(&mut read_buf).unwrap_or(0);
-        if n == 0 { break; }
-        for &b in &read_buf[..n] {
-            if b == b'\r' || b == b'\n' {
-                if !line_buf.is_empty() {
-                    let line = String::from_utf8_lossy(&line_buf).to_string();
-                    if let Some((bytes, _)) = parse_rsync_progress_line(&line) {
-                        let _ = app.emit("sftp-progress", SftpProgress {
-                            id: transfer_id.to_string(),
-                            bytes_sent: bytes,
-                            total,
-                            done: false,
-                            error: None,
-                            remote_path: None,
-                            protocol: "rsync".to_string(),
-                        });
-                    }
-                    line_buf.clear();
-                }
-            } else {
-                line_buf.push(b);
-            }
-        }
-    }
-
-    let status = child.wait().map_err(|e| e.to_string())?;
-    if !status.success() {
-        let mut stderr_out = String::new();
-        if let Some(ref mut se) = stderr_pipe {
-            let _ = se.read_to_string(&mut stderr_out);
-        }
-        let code = status.code().unwrap_or(-1);
-        // For transient errors (partial transfer, connection drop) bubble up a
-        // distinct marker so the caller can decide to retry vs fall through to SCP.
-        // For permanent errors (127 = no rsync, 255 = ssh auth) we just fail fast.
-        let msg = format!("rsync ({}): {}", code, stderr_out.trim());
-        if is_rsync_transient_error(&stderr_out, code) {
-            // One retry attempt before giving up
-            return Err(format!("transient:{}", msg));
-        }
-        return Err(msg);
-    }
-
-    let filename = Path::new(local_path).file_name().unwrap_or_default().to_string_lossy();
-    let remote_path = format!("{}/{}", remote_dir.trim_end_matches('/'), filename);
-    let _ = app.emit("sftp-progress", SftpProgress {
-        id: transfer_id.to_string(),
-        bytes_sent: total,
-        total,
-        done: true,
-        error: None,
-        remote_path: Some(remote_path),
-        protocol: "rsync".to_string(),
-    });
-    Ok(())
-}
-
-fn do_sftp_upload(
-    app: &tauri::AppHandle,
-    transfer_id: &str,
-    host: &str,
-    port: u16,
-    user: &str,
-    pass: &str,
-    key_path: Option<&str>,
-    local_path: &str,
-    remote_dir: &str,
-) -> Result<(), String> {
-    use std::fs;
-    let tcp = TcpStream::connect(format!("{}:{}", host, port)).map_err(|e| e.to_string())?;
-    let mut sess = Session::new().map_err(|e| e.to_string())?;
-    sess.set_tcp_stream(tcp);
-    sess.handshake().map_err(|e| e.to_string())?;
-
-    let mut authed = false;
-    if let Some(kp) = key_path {
-        if sess.userauth_pubkey_file(user, None, Path::new(kp), None).is_ok() && sess.authenticated() {
-            authed = true;
-        }
-    }
-    if !authed {
-        sess.userauth_password(user, pass).map_err(|e| e.to_string())?;
-        if !sess.authenticated() {
-            return Err("SFTP authentication failed".into());
-        }
-    }
-
-    let sftp = sess.sftp().map_err(|e| e.to_string())?;
-
-    // Resolve ~ to actual home directory
-    let resolved_dir = if remote_dir == "~" || remote_dir.starts_with("~/") {
-        let home = sftp.realpath(Path::new(".")).map_err(|e| e.to_string())?;
-        let home_str = home.to_string_lossy().to_string();
-        if remote_dir == "~" {
-            home_str
-        } else {
-            format!("{}/{}", home_str, &remote_dir[2..])
-        }
-    } else {
-        remote_dir.to_string()
-    };
-
-    // Ensure remote directory exists (create recursively)
-    {
-        let mut cumulative = String::new();
-        for part in resolved_dir.split('/') {
-            if part.is_empty() {
-                cumulative.push('/');
-                continue;
-            }
-            if !cumulative.is_empty() && !cumulative.ends_with('/') {
-                cumulative.push('/');
-            }
-            cumulative.push_str(part);
-            let _ = sftp.mkdir(Path::new(&cumulative), 0o755);
-        }
-    }
-
-    let local_data = fs::read(local_path).map_err(|e| e.to_string())?;
-    let total = local_data.len() as u64;
-
-    let filename = Path::new(local_path)
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-    let remote_file_path = format!("{}/{}", resolved_dir.trim_end_matches('/'), filename);
-
-    let mut remote_file = sftp
-        .open_mode(
-            Path::new(&remote_file_path),
-            OpenFlags::WRITE | OpenFlags::TRUNCATE | OpenFlags::CREATE,
-            0o644,
-            OpenType::File,
-        )
-        .map_err(|e| format!("SFTP open {}: {}", remote_file_path, e))?;
-
-    // 512KB chunks for fast SFTP transfers
-    const CHUNK_SIZE: usize = 524288;
-    // Report progress every 5MB or 10 chunks to reduce IPC overhead
-    const PROGRESS_INTERVAL: usize = 5242880;
-    
-    let mut offset = 0usize;
-    let mut last_progress: u64 = 0;
-    while offset < local_data.len() {
-        let end = (offset + CHUNK_SIZE).min(local_data.len());
-        remote_file.write_all(&local_data[offset..end]).map_err(|e| e.to_string())?;
-        offset = end;
-        
-        // Throttle progress events: only emit if 5MB+ sent or transfer complete
-        if (offset as u64 - last_progress) >= PROGRESS_INTERVAL as u64 || offset >= local_data.len() {
-            last_progress = offset as u64;
-            let _ = app.emit("sftp-progress", SftpProgress {
-                id: transfer_id.to_string(),
-                bytes_sent: offset as u64,
-                total,
-                done: false,
-                error: None,
-                remote_path: None,
-                protocol: "sftp".to_string(),
-            });
-        }
-    }
-
-    let _ = app.emit("sftp-progress", SftpProgress {
-        id: transfer_id.to_string(),
-        bytes_sent: total,
-        total,
-        done: true,
-        error: None,
-        remote_path: Some(remote_file_path),
-        protocol: "sftp".to_string(),
-    });
-    Ok(())
-}
-
-/// SCP upload (3-5x faster than SFTP for large files)
+/// SCP upload
 fn do_scp_upload(
     app: &tauri::AppHandle,
     transfer_id: &str,
@@ -603,7 +301,6 @@ fn do_scp_upload(
     local_path: &str,
     remote_dir: &str,
 ) -> Result<(), String> {
-    use std::fs;
     let tcp = TcpStream::connect(format!("{}:{}", host, port)).map_err(|e| e.to_string())?;
     // Disable Nagle's algorithm: reduces latency for the many small SCP protocol writes
     tcp.set_nodelay(true).ok();
@@ -624,8 +321,10 @@ fn do_scp_upload(
         }
     }
 
-    let local_data = fs::read(local_path).map_err(|e| e.to_string())?;
-    let total = local_data.len() as u64;
+    use std::fs::File;
+    use std::io::BufReader;
+
+    let total = std::fs::metadata(local_path).map_err(|e| e.to_string())?.len();
 
     let filename = Path::new(local_path)
         .file_name()
@@ -633,8 +332,12 @@ fn do_scp_upload(
         .to_string_lossy()
         .to_string();
 
-    // SCP command: scp -t -r <remote_dir>
-    let scp_cmd = format!("scp -t -r {}", remote_dir);
+    // Sanitise remote_dir for shell safety: wrap in single quotes, escape embedded single quotes.
+    // This prevents path injection and handles spaces/special characters.
+    let safe_dir = remote_dir.replace('\'', "'\\''"  );
+    // Resolve ~ on the remote side via the shell before invoking scp sink.
+    // The command expands the path then hands off to the scp sink protocol.
+    let scp_cmd = format!("D='{safe_dir}'; mkdir -p \"$D\" 2>/dev/null; scp -t \"$D\"");
     let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
     channel.exec(&scp_cmd).map_err(|e| format!("SCP exec failed: {}", e))?;
 
@@ -642,22 +345,28 @@ fn do_scp_upload(
     let scp_header = format!("C0644 {} {}\n", total, filename);
     channel.write_all(scp_header.as_bytes()).map_err(|e| e.to_string())?;
 
-    // 4MB chunks: SCP has very little per-write overhead vs SFTP, larger chunks = fewer round-trips
+    // Stream file in 4MB chunks — avoids loading the entire file into RAM
     const CHUNK_SIZE: usize = 4194304;
-    const PROGRESS_INTERVAL: usize = 5242880;
-    
-    let mut offset = 0usize;
+    const PROGRESS_INTERVAL: u64 = 5242880;
+
+    let file = File::open(local_path).map_err(|e| e.to_string())?;
+    let mut reader = BufReader::with_capacity(CHUNK_SIZE, file);
+    let mut offset: u64 = 0;
     let mut last_progress: u64 = 0;
-    while offset < local_data.len() {
-        let end = (offset + CHUNK_SIZE).min(local_data.len());
-        channel.write_all(&local_data[offset..end]).map_err(|e| e.to_string())?;
-        offset = end;
-        
-        if (offset as u64 - last_progress) >= PROGRESS_INTERVAL as u64 || offset >= local_data.len() {
-            last_progress = offset as u64;
+    let mut chunk_buf = vec![0u8; CHUNK_SIZE];
+
+    loop {
+        use std::io::Read as _;
+        let n = reader.read(&mut chunk_buf).map_err(|e| e.to_string())?;
+        if n == 0 { break; }
+        channel.write_all(&chunk_buf[..n]).map_err(|e| e.to_string())?;
+        offset += n as u64;
+
+        if offset - last_progress >= PROGRESS_INTERVAL || offset >= total {
+            last_progress = offset;
             let _ = app.emit("sftp-progress", SftpProgress {
                 id: transfer_id.to_string(),
-                bytes_sent: offset as u64,
+                bytes_sent: offset,
                 total,
                 done: false,
                 error: None,

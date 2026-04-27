@@ -1,12 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import {
-    useCallback,
-    useDeferredValue,
-    useEffect,
-    useMemo,
-    useRef,
-    useState,
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
 } from "react";
 import "xterm/css/xterm.css";
 import { NewSession } from "./components/NewSession";
@@ -18,11 +18,11 @@ import { TerminalPane } from "./components/TerminalPane";
 import "./index.css";
 import { getTheme, THEMES } from "./themes";
 import {
-    NEON_COLORS,
-    type Credential,
-    type GeneralSettings,
-    type SessionEntry,
-    type TabPane,
+  NEON_COLORS,
+  type Credential,
+  type GeneralSettings,
+  type SessionEntry,
+  type TabPane,
 } from "./types";
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -324,7 +324,7 @@ function App() {
   // ── Session CRUD ──
   function addSession() {
     const newLabel = form.label || `${form.user}@${form.host}`;
-    if (sessions.some((s) => s.label === newLabel)) return;
+    if (sessions.some((s) => s.label === newLabel)) return false;
     const cred = credentials.find((c) => c.id === form.credentialId);
     const s: SessionEntry = {
       id: crypto.randomUUID(),
@@ -350,6 +350,7 @@ function App() {
       credentialId: "",
     });
     setSelectedColor(NEON_COLORS[0]);
+    return true;
   }
 
   const removeSession = useCallback((id: string, e: React.MouseEvent) => {
@@ -359,6 +360,8 @@ function App() {
     try {
       localStorage.setItem("atlas_sessions", JSON.stringify(updated));
     } catch {}
+    // Clean up keychain entry so credentials don't linger after session deletion
+    invoke("delete_credential", { id: `sess_${id}` }).catch(() => {});
   }, []);
 
   function updateSession() {
@@ -458,6 +461,15 @@ function App() {
     const allTabs = [...tabsRef.current];
     allTabs.forEach((t) => closeTabById(t.tabId));
   }, [closeTabById]);
+
+  const prefillNewSession = useCallback(
+    (host: string) => {
+      setForm((f) => ({ ...f, host }));
+      setSearchQuery("");
+      openView("new-session");
+    },
+    [openView],
+  );
 
   const toggleSplitForTab = useCallback(
     (tabId: string, direction?: "horizontal" | "vertical") => {
@@ -725,6 +737,7 @@ function App() {
               darkMode={darkMode}
               importStatus={importStatus}
               openView={openView}
+              prefillNewSession={prefillNewSession}
               editingSession={editingSession}
               setEditingSession={setEditingSession}
               editForm={editForm}

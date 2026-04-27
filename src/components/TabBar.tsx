@@ -198,10 +198,8 @@ export const TabBar = memo(function TabBar({
 
         {/* SSH terminal tabs */}
         <div
-          className="flex-1 min-w-0 overflow-hidden grid items-stretch"
-          style={{
-            gridTemplateColumns: `${tabs.map(() => "minmax(0, 180px)").join(" ")} auto 1fr`,
-          }}
+          className="flex-1 min-w-0 overflow-x-auto overflow-y-hidden flex items-stretch"
+          style={{ scrollbarWidth: "none" }}
         >
           {tabs.map((tab) => {
             const accent = tab.sessionEntry.color || "#00E5FF";
@@ -227,7 +225,7 @@ export const TabBar = memo(function TabBar({
                     y: e.clientY,
                   });
                 }}
-                className={`hx-tab group flex items-center gap-1 pl-1 pr-2 min-w-0 text-xs whitespace-nowrap cursor-default ${
+                className={`hx-tab group flex items-center gap-1 pl-1 pr-2 w-44 shrink-0 text-xs whitespace-nowrap cursor-default ${
                   isActive ? "hx-tab-term-active" : ""
                 } ${tabDragOverId === tab.tabId ? "ring-1 ring-hx-neon/40" : ""}`}
                 style={
@@ -349,13 +347,13 @@ export const TabBar = memo(function TabBar({
           <button
             onMouseDown={(e) => e.stopPropagation()}
             onClick={() => openView("overview")}
-            className="flex items-center justify-center w-8 h-full text-white/40 hover:text-white hover:bg-white/10 transition-colors"
+            className="flex items-center justify-center w-8 h-full shrink-0 text-white/40 hover:text-white hover:bg-white/10 transition-colors"
             title="Sessions"
           >
             <Plus size={12} />
           </button>
           {/* Drag spacer */}
-          <div data-tauri-drag-region className="h-full" />
+          <div data-tauri-drag-region className="flex-1 h-full min-w-4" />
         </div>
 
         {/* Window controls */}

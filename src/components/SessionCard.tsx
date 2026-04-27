@@ -39,17 +39,29 @@ export const SessionCard = memo(
     const statusText = isConnected ? "CONNECTED" : isOpen ? "OPEN" : "IDLE";
 
     const [menuOpen, setMenuOpen] = useState(false);
+    const [confirmDelete, setConfirmDelete] = useState(false);
     const menuRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
       if (!menuOpen) return;
-      const handler = (e: MouseEvent) => {
+      const handleMouse = (e: MouseEvent) => {
         if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
           setMenuOpen(false);
+          setConfirmDelete(false);
         }
       };
-      document.addEventListener("mousedown", handler);
-      return () => document.removeEventListener("mousedown", handler);
+      const handleKey = (e: KeyboardEvent) => {
+        if (e.key === "Escape") {
+          setMenuOpen(false);
+          setConfirmDelete(false);
+        }
+      };
+      document.addEventListener("mousedown", handleMouse);
+      document.addEventListener("keydown", handleKey);
+      return () => {
+        document.removeEventListener("mousedown", handleMouse);
+        document.removeEventListener("keydown", handleKey);
+      };
     }, [menuOpen]);
 
     return (
@@ -95,21 +107,45 @@ export const SessionCard = memo(
                   <button
                     onClick={() => {
                       setMenuOpen(false);
+                      setConfirmDelete(false);
                       onEdit(session);
                     }}
                     className="w-full text-left flex items-center gap-2 px-3 py-2 text-xs font-mono text-hx-muted hover:text-hx-neon hover:bg-hx-neon/5 transition-colors"
                   >
                     <Edit2 size={10} /> Edit
                   </button>
-                  <button
-                    onClick={(e) => {
-                      setMenuOpen(false);
-                      onRemove(session.id, e);
-                    }}
-                    className="w-full text-left flex items-center gap-2 px-3 py-2 text-xs font-mono text-hx-muted hover:text-hx-danger hover:bg-hx-danger/5 transition-colors"
-                  >
-                    <Trash2 size={10} /> Delete
-                  </button>
+                  {confirmDelete ? (
+                    <div className="px-3 py-2 flex flex-col gap-1.5">
+                      <span className="text-[10px] text-hx-danger font-mono">
+                        Delete?
+                      </span>
+                      <div className="flex gap-1">
+                        <button
+                          onClick={(e) => {
+                            setMenuOpen(false);
+                            setConfirmDelete(false);
+                            onRemove(session.id, e);
+                          }}
+                          className="flex-1 text-[10px] font-mono py-1 text-hx-danger border border-hx-danger/40 hover:bg-hx-danger/10 transition-colors"
+                        >
+                          Yes
+                        </button>
+                        <button
+                          onClick={() => setConfirmDelete(false)}
+                          className="flex-1 text-[10px] font-mono py-1 text-hx-muted border border-hx-border hover:bg-white/5 transition-colors"
+                        >
+                          No
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => setConfirmDelete(true)}
+                      className="w-full text-left flex items-center gap-2 px-3 py-2 text-xs font-mono text-hx-muted hover:text-hx-danger hover:bg-hx-danger/5 transition-colors"
+                    >
+                      <Trash2 size={10} /> Delete
+                    </button>
+                  )}
                 </div>
               )}
             </div>

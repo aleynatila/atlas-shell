@@ -18,6 +18,7 @@ interface OverviewProps {
   darkMode: boolean;
   importStatus: string | null;
   openView: (kind: "overview" | "settings" | "new-session") => void;
+  prefillNewSession: (host: string) => void;
   editingSession: SessionEntry | null;
   setEditingSession: (s: SessionEntry | null) => void;
   editForm: {
@@ -61,6 +62,7 @@ export const Overview = memo(function Overview({
   darkMode,
   importStatus,
   openView,
+  prefillNewSession,
   editingSession,
   setEditingSession,
   editForm,
@@ -111,13 +113,24 @@ export const Overview = memo(function Overview({
               </button>
             </div>
           </div>
-          <input
-            type="text"
-            placeholder="Search sessions..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="hx-input bg-hx-bg border border-hx-border px-3 py-1.5 text-xs w-full font-mono"
-          />
+          <div className="relative">
+            <input
+              type="text"
+              placeholder="Search sessions..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="hx-input bg-hx-bg border border-hx-border px-3 py-1.5 text-xs w-full font-mono pr-7"
+            />
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery("")}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-hx-dim hover:text-hx-text transition-colors"
+                title="Clear search"
+              >
+                <span className="text-sm leading-none">×</span>
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Empty state */}
@@ -138,6 +151,30 @@ export const Overview = memo(function Overview({
               className="text-xs text-hx-neon hover:underline font-mono tracking-wider"
             >
               + Create your first session
+            </button>
+          </div>
+        ) : overviewSessions.length === 0 && searchQuery ? (
+          <div className="flex flex-col items-center justify-center h-56 gap-4">
+            <div className="relative">
+              <div
+                className="w-14 h-14 border border-hx-neon/20 rotate-45 flex items-center justify-center"
+                style={{ boxShadow: "0 0 16px rgba(0,229,255,0.04)" }}
+              >
+                <Server size={17} className="text-hx-dim -rotate-45" />
+              </div>
+              <div className="absolute -inset-3 border border-hx-neon/08 rotate-45" />
+            </div>
+            <p className="text-hx-muted text-sm font-mono">
+              No session found for{" "}
+              <span className="text-hx-text font-bold">"{searchQuery}"</span>
+            </p>
+            <button
+              onClick={() => prefillNewSession(searchQuery)}
+              className="hx-clip-btn flex items-center gap-2 px-4 py-2 text-[11px] font-bold uppercase tracking-widest text-hx-neon border border-hx-neon/40 hover:border-hx-neon/80 hover:bg-hx-neon/10 transition-all"
+              style={{ boxShadow: "0 0 12px rgba(0,229,255,0.08)" }}
+            >
+              <Plus size={12} />
+              Create session for "{searchQuery}"
             </button>
           </div>
         ) : (

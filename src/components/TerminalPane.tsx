@@ -1,3 +1,4 @@
+import { getVersion as getAppVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
@@ -72,10 +73,25 @@ export const TerminalPane = memo(function TerminalPane({
   const currentCwdRef = useRef("~");
   const pwdResponseRef = useRef<string>("");
   const waitingForPwdRef = useRef(false);
+  // Reconnect storm guard: track consecutive auto-reconnect attempts
+  const reconnectCountRef = useRef(0);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const MAX_AUTO_RECONNECTS = 3;
+  const RECONNECT_DELAY_MS = 3000;
+  const appVersionRef = useRef("…");
   const isTauriRuntime =
     typeof window !== "undefined" &&
     typeof (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ ===
       "object";
+
+  useEffect(() => {
+    if (!isTauriRuntime) return;
+    getAppVersion()
+      .then((v) => {
+        appVersionRef.current = v;
+      })
+      .catch(() => {});
+  }, []);
 
   function invokeSafe<T = unknown>(
     command: string,
@@ -415,7 +431,9 @@ export const TerminalPane = memo(function TerminalPane({
       term.focus();
     }, 150);
     term.write("\x1b[36m\x1b[2m╔══════════════════════════╗\x1b[0m\r\n");
-    term.write("\x1b[36m\x1b[2m║  ATLAS TERMINAL  v1.0    ║\x1b[0m\r\n");
+    term.write(
+      `\x1b[36m\x1b[2m║  ATLAS TERMINAL  v${appVersionRef.current.padEnd(6)}║\x1b[0m\r\n`,
+    );
     term.write("\x1b[36m\x1b[2m╚══════════════════════════╝\x1b[0m\r\n\r\n");
     term.write(
       `\x1b[35m◆ Target:\x1b[0m \x1b[36m${pane.sessionEntry.user}@${pane.sessionEntry.host}:${pane.sessionEntry.port}\x1b[0m\r\n`,
@@ -680,6 +698,7 @@ export const TerminalPane = memo(function TerminalPane({
       );
       const webglToDispose = webglRef.current as any;
       escapeSequenceRemainderRef.current = "";
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       termRef.current = null;
       fitRef.current = null;
       webglRef.current = null;
@@ -809,6 +828,7 @@ export const TerminalPane = memo(function TerminalPane({
           const sshId = id as string;
           sshIdRef.current = sshId;
           setConnecting(false);
+          reconnectCountRef.current = 0; // reset on successful connect
           onConnected(pane.tabId, sshId);
           listenSafe(`ssh-output-${sshId}`, (event) => {
             // Discard events from a session that is no longer current.
@@ -828,9 +848,36 @@ export const TerminalPane = memo(function TerminalPane({
                 unlistenRef.current = null;
               }
               term.write("\r\n\x1b[90m[disconnected]\x1b[0m\r\n");
-              term.write("\r\nlogin as: ");
-              promptRef.current = { stage: "user", user: "", pass: "" };
               onDisconnected(pane.tabId);
+              const hasCreds = !!(
+                pane.sessionEntry.pass ||
+                pane.sessionEntry.keyPath ||
+                password
+              );
+              if (hasCreds && reconnectCountRef.current < MAX_AUTO_RECONNECTS) {
+                reconnectCountRef.current += 1;
+                term.write(
+                  `\r\n\x1b[90m[reconnecting in 3s… attempt ${reconnectCountRef.current}/${MAX_AUTO_RECONNECTS}]\x1b[0m\r\n`,
+                );
+                if (reconnectTimerRef.current)
+                  clearTimeout(reconnectTimerRef.current);
+                reconnectTimerRef.current = setTimeout(() => {
+                  reconnectTimerRef.current = null;
+                  connectCredsRef.current?.();
+                }, RECONNECT_DELAY_MS);
+              } else if (
+                hasCreds &&
+                reconnectCountRef.current >= MAX_AUTO_RECONNECTS
+              ) {
+                term.write(
+                  `\r\n\x1b[31m[auto-reconnect limit reached — press Ctrl+F5 to reconnect manually]\x1b[0m\r\n`,
+                );
+                term.write("\r\nlogin as: ");
+                promptRef.current = { stage: "user", user: "", pass: "" };
+              } else {
+                term.write("\r\nlogin as: ");
+                promptRef.current = { stage: "user", user: "", pass: "" };
+              }
               return;
             }
 
@@ -891,6 +938,7 @@ export const TerminalPane = memo(function TerminalPane({
       el.__connect = connect;
       // __reconnect: stop any active session, reset terminal, show fresh
       // credential prompt — user types new user/pass from scratch.
+      // If credentials are already saved, skip the prompt and reconnect directly.
       el.__reconnect = () => {
         const term = termRef.current;
         if (!term) return;
@@ -908,8 +956,17 @@ export const TerminalPane = memo(function TerminalPane({
         onDisconnected(pane.tabId);
         promptRef.current = null;
         term.reset();
-        term.write("\r\nlogin as: ");
-        promptRef.current = { stage: "user", user: "", pass: "" };
+        const hasCreds = !!(
+          pane.sessionEntry.pass ||
+          pane.sessionEntry.keyPath ||
+          password
+        );
+        if (hasCreds) {
+          connectCredsRef.current?.();
+        } else {
+          term.write("\r\nlogin as: ");
+          promptRef.current = { stage: "user", user: "", pass: "" };
+        }
       };
       el.__fit = () => {
         try {
@@ -920,7 +977,10 @@ export const TerminalPane = memo(function TerminalPane({
         const sid = sshIdRef.current;
         if (sid) {
           invokeSafe("stop_ssh_session", { sessionId: sid }).catch(() => {});
-          if (unlistenRef.current) unlistenRef.current();
+          if (unlistenRef.current) {
+            unlistenRef.current();
+            unlistenRef.current = null;
+          }
           sshIdRef.current = null;
         }
         onDisconnected(pane.tabId);

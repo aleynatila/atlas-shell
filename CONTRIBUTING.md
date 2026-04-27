@@ -7,7 +7,7 @@
 - [Rust](https://rustup.rs/) (stable, 1.76+)
 - [Node.js](https://nodejs.org/) 18+
 - Windows build tools (MSVC / Visual Studio Build Tools)
-- [Tauri CLI](https://tauri.app/v1/guides/getting-started/prerequisites)
+- [Tauri CLI](https://v2.tauri.app/start/prerequisites/)
 
 ### Getting Started
 

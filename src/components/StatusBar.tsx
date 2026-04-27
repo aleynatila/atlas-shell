@@ -36,7 +36,11 @@ export const StatusBar = memo(function StatusBar({
             {activeTab.sessionEntry.host}
           </span>
           <span>
-            {activeTab.sessionEntry.keyPath ? "KEY AUTH" : "PASS AUTH"}
+            {activeTab.sessionEntry.keyPath ||
+            (activeTab.sessionEntry.credentialId &&
+              !activeTab.sessionEntry.pass)
+              ? "KEY AUTH"
+              : "PASS AUTH"}
           </span>
           <span>UTF-8</span>
         </>

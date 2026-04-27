@@ -3,28 +3,28 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import { check as checkUpdate } from "@tauri-apps/plugin-updater";
 import {
-  Download,
-  Edit2,
-  ExternalLink,
-  FolderOpen,
-  Info,
-  Key,
-  Play,
-  RefreshCw,
-  Trash2,
-  X,
+    Download,
+    Edit2,
+    ExternalLink,
+    FolderOpen,
+    Info,
+    Key,
+    Play,
+    RefreshCw,
+    Trash2,
+    X,
 } from "lucide-react";
 import { memo, useCallback, useEffect, useState } from "react";
 import { THEMES } from "../themes";
 import {
-  adaptColor,
-  COLOR_PAIRS,
-  NEON_COLORS,
-  type Credential,
-  type GeneralSettings,
-  type Script,
-  type SessionEntry,
-  type Tag,
+    adaptColor,
+    COLOR_PAIRS,
+    NEON_COLORS,
+    type Credential,
+    type GeneralSettings,
+    type Script,
+    type SessionEntry,
+    type Tag,
 } from "../types";
 
 interface SettingsProps {
@@ -1451,29 +1451,31 @@ function UpdatesTab({
     setError(null);
     setInstallStatus(null);
     try {
-      const update = await checkUpdate();
+      // Fetch latest.json directly — bypasses Tauri plugin deserialization
+      // which crashes when signature field is null instead of a string.
+      const res = await fetch(
+        "https://github.com/aleynatila/atlas-shell/releases/latest/download/latest.json",
+        { cache: "no-store" },
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const manifest = (await res.json()) as {
+        version?: string;
+        notes?: string;
+        pub_date?: string;
+      };
       const manifestVersion = normalizeVersion(
-        update?.version || currentVersion,
+        manifest.version || currentVersion,
       );
       const effectiveShouldUpdate =
         compareVersions(manifestVersion, currentVersion) > 0;
-      const info: UpdateInfo = update
-        ? {
-            version: manifestVersion,
-            name: `v${manifestVersion}`,
-            body: update.body || "",
-            publishedAt: normalizePublishedAt(update.date, undefined),
-            htmlUrl: RELEASES_URL,
-            downloadUrl: null,
-          }
-        : {
-            version: currentVersion,
-            name: `v${currentVersion}`,
-            body: "",
-            publishedAt: "",
-            htmlUrl: RELEASES_URL,
-            downloadUrl: null,
-          };
+      const info: UpdateInfo = {
+        version: manifestVersion,
+        name: `v${manifestVersion}`,
+        body: manifest.notes || "",
+        publishedAt: normalizePublishedAt(manifest.pub_date),
+        htmlUrl: RELEASES_URL,
+        downloadUrl: null,
+      };
 
       setUpdateAvailable(effectiveShouldUpdate);
       setLatestRelease(info);
