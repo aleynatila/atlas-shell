@@ -360,7 +360,11 @@ export function Settings({
                     (s.user || "").toLowerCase().includes(q)
                   );
                 });
-                if (sessions.length > 0 && filtered.length === 0 && settingsSearch) {
+                if (
+                  sessions.length > 0 &&
+                  filtered.length === 0 &&
+                  settingsSearch
+                ) {
                   return (
                     <div className="flex flex-col items-center justify-center py-8 gap-3">
                       <div className="relative">
@@ -368,13 +372,18 @@ export function Settings({
                           className="w-10 h-10 border border-hx-neon/20 rotate-45 flex items-center justify-center"
                           style={{ boxShadow: "0 0 12px rgba(0,229,255,0.04)" }}
                         >
-                          <Server size={14} className="text-hx-dim -rotate-45" />
+                          <Server
+                            size={14}
+                            className="text-hx-dim -rotate-45"
+                          />
                         </div>
                         <div className="absolute -inset-2 border border-hx-neon/08 rotate-45" />
                       </div>
                       <p className="text-hx-muted text-xs font-mono">
                         No session found for{" "}
-                        <span className="text-hx-text font-bold">"{settingsSearch}"</span>
+                        <span className="text-hx-text font-bold">
+                          "{settingsSearch}"
+                        </span>
                       </p>
                       <button
                         onClick={() => prefillNewSession(settingsSearch)}
