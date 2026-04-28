@@ -1,15 +1,15 @@
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import {
-    Columns2,
-    ExternalLink,
-    Minus,
-    Plus,
-    RefreshCw,
-    Rows2,
-    Server,
-    Settings,
-    Square,
-    X,
+  Columns2,
+  ExternalLink,
+  Minus,
+  Plus,
+  RefreshCw,
+  Rows2,
+  Server,
+  Settings,
+  Square,
+  X,
 } from "lucide-react";
 import { memo, useRef, useState } from "react";
 import { adaptColor, type TabPane } from "../types";
@@ -197,10 +197,7 @@ export const TabBar = memo(function TabBar({
         )}
 
         {/* SSH terminal tabs */}
-        <div
-          className="flex-1 min-w-0 overflow-x-auto overflow-y-hidden flex items-stretch"
-          style={{ scrollbarWidth: "none" }}
-        >
+        <div className="flex-1 min-w-0 overflow-hidden flex items-stretch">
           {tabs.map((tab) => {
             const accent = tab.sessionEntry.color || "#00E5FF";
             const isActive = activeView === tab.tabId;
@@ -225,7 +222,7 @@ export const TabBar = memo(function TabBar({
                     y: e.clientY,
                   });
                 }}
-                className={`hx-tab group flex items-center gap-1 pl-1 pr-2 w-44 shrink-0 text-xs whitespace-nowrap cursor-default ${
+                className={`hx-tab group flex items-center gap-1 pl-1 pr-2 flex-1 min-w-20 max-w-44 text-xs whitespace-nowrap cursor-default ${
                   isActive ? "hx-tab-term-active" : ""
                 } ${tabDragOverId === tab.tabId ? "ring-1 ring-hx-neon/40" : ""}`}
                 style={
