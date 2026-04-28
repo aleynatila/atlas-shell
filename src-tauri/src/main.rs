@@ -313,8 +313,8 @@ fn do_scp_upload(
     local_path: &str,
     remote_dir: &str,
 ) -> Result<(), String> {
-    // Build a tuned TCP socket: large kernel send buffer reduces blocking during encryption.
-    // SO_SNDBUF 4 MB lets the kernel pipeline data far ahead of the SSH encryption cycle.
+    // Tuned TCP socket: 4 MB send buffer keeps the kernel pipeline full
+    // ahead of the SSH encryption cycle; nodelay kills Nagle latency.
     let addr: SocketAddr = format!("{}:{}", host, port)
         .to_socket_addrs()
         .map_err(|e| e.to_string())?
@@ -323,8 +323,8 @@ fn do_scp_upload(
     let domain = if addr.is_ipv6() { Domain::IPV6 } else { Domain::IPV4 };
     let raw = Socket::new(domain, Type::STREAM, Some(Protocol::TCP)).map_err(|e| e.to_string())?;
     raw.set_nodelay(true).ok();
-    raw.set_send_buffer_size(4 * 1024 * 1024).ok(); // 4 MB kernel send buffer
-    raw.set_recv_buffer_size(512 * 1024).ok();       // 512 KB recv (acks are tiny)
+    raw.set_send_buffer_size(4 * 1024 * 1024).ok();
+    raw.set_recv_buffer_size(512 * 1024).ok();
     raw.connect(&addr.into()).map_err(|e| e.to_string())?;
     let tcp: TcpStream = raw.into();
 
@@ -355,29 +355,19 @@ fn do_scp_upload(
         .to_string_lossy()
         .to_string();
 
-    let safe_dir = remote_dir.replace('\'', "'\\''"  );
-    let scp_cmd = format!("D='{safe_dir}'; mkdir -p \"$D\" 2>/dev/null; scp -t \"$D\"");
-    let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
-    channel.exec(&scp_cmd).map_err(|e| format!("SCP exec failed: {}", e))?;
+    // Construct full remote path: ensure the directory exists via a channel exec,
+    // then let scp_send handle the rest natively.
+    let remote_path = format!("{}/{}", remote_dir.trim_end_matches('/'), filename);
 
-    // SCP protocol step 1: wait for server's ready acknowledgment (0x00)
-    let mut ack = [0u8; 1];
-    channel.read_exact(&mut ack).map_err(|e| format!("SCP ack1 failed: {}", e))?;
-    if ack[0] != 0 {
-        return Err(format!("SCP server error after exec (code {})", ack[0]));
+    // mkdir -p the remote dir (best-effort — some servers may not have mkdir)
+    {
+        let safe_dir = remote_dir.replace('\'', "'\\''");
+        let mut mkdir_ch = sess.channel_session().map_err(|e| e.to_string())?;
+        let _ = mkdir_ch.exec(&format!("mkdir -p '{safe_dir}'"));
+        let _ = mkdir_ch.wait_close();
     }
 
-    // SCP protocol step 2: send "C0644 <size> <filename>\n"
-    let scp_header = format!("C0644 {} {}\n", total, filename);
-    channel.write_all(scp_header.as_bytes()).map_err(|e| e.to_string())?;
-
-    // SCP protocol step 3: wait for server to accept the header (0x00)
-    channel.read_exact(&mut ack).map_err(|e| format!("SCP ack2 failed: {}", e))?;
-    if ack[0] != 0 {
-        return Err(format!("SCP server rejected file header (code {})", ack[0]));
-    }
-
-    // Emit 0% immediately so the UI shows the transfer as started
+    // Emit 0% / Connecting state immediately
     let _ = app.emit("sftp-progress", SftpProgress {
         id: transfer_id.to_string(),
         bytes_sent: 0,
@@ -388,30 +378,28 @@ fn do_scp_upload(
         protocol: "scp".to_string(),
     });
 
-    // READ_BUF: large enough to amortise read() syscalls.
-    // WRITE_CHUNK: 128 KB — fits within the typical 2 MB libssh2 channel window,
-    //   keeps the window from draining and avoids long blocking waits.
-    const WRITE_CHUNK: usize = 131072;           // 128 KB SSH write granularity
-    const PROGRESS_INTERVAL: u64 = 524288;       // emit every 512 KB
+    // Use libssh2's native scp_send — handles all C0644 header + ACK handshake
+    // internally at the C level. No manual \0 reads, no protocol drift, no corruption.
+    let mut channel = sess
+        .scp_send(Path::new(&remote_path), 0o644, total, None)
+        .map_err(|e| format!("SCP open failed: {}", e))?;
 
-    let file = File::open(local_path).map_err(|e| e.to_string())?;
+    // 128 KB write chunks: fits within libssh2's 2 MB channel window so
+    // the window never drains and causes a blocking stall.
+    const WRITE_CHUNK: usize = 131_072;
+    const PROGRESS_INTERVAL: u64 = 524_288; // emit every 512 KB
+
     let mut offset: u64 = 0;
     let mut last_progress: u64 = 0;
 
-    // Memory-map the file: the OS prefetches pages into RAM transparently,
-    // eliminating repeated read() syscalls and the kernel→user copy overhead.
-    // Falls back to regular read() for zero-length files (mmap of 0 bytes is UB).
-    if total == 0 {
-        // Nothing to send — fall through to the EOF marker below.
-    } else {
-        // SAFETY: we do not mutate the mapping and the file is not truncated during transfer.
+    if total > 0 {
+        let file = File::open(local_path).map_err(|e| e.to_string())?;
+        // Memory-map: OS prefetches pages into RAM; zero kernel→user copies.
+        // SAFETY: file is not modified during transfer, mapping is read-only.
         let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| e.to_string())?;
-        let data: &[u8] = &mmap;
 
-        while offset < total {
-            let end = ((offset + WRITE_CHUNK as u64) as usize).min(data.len());
-            let chunk = &data[offset as usize..end];
-            channel.write_all(chunk).map_err(|e| e.to_string())?;
+        for chunk in mmap.chunks(WRITE_CHUNK) {
+            channel.write_all(chunk).map_err(|e| format!("SCP write error: {}", e))?;
             offset += chunk.len() as u64;
 
             if offset - last_progress >= PROGRESS_INTERVAL || offset >= total {
@@ -429,15 +417,12 @@ fn do_scp_upload(
         }
     }
 
-    // SCP protocol: send null byte to signal EOF
-    channel.write_all(&[0]).map_err(|e| e.to_string())?;
-    channel.flush().map_err(|e| e.to_string())?;
+    // Proper close sequence — libssh2 sends EOF + waits for server confirmation.
+    channel.send_eof().map_err(|e| e.to_string())?;
+    channel.wait_eof().map_err(|e| e.to_string())?;
+    channel.close().map_err(|e| e.to_string())?;
+    channel.wait_close().map_err(|e| e.to_string())?;
 
-    // Wait for SCP to acknowledge
-    let mut buf = [0u8; 1];
-    let _ = channel.read(&mut buf);
-
-    let remote_path = format!("{}/{}", remote_dir.trim_end_matches('/'), filename);
     let _ = app.emit("sftp-progress", SftpProgress {
         id: transfer_id.to_string(),
         bytes_sent: total,
@@ -449,6 +434,7 @@ fn do_scp_upload(
     });
     Ok(())
 }
+
 
 /// Store a password in the OS keychain (Windows Credential Manager / macOS Keychain / SecretService)
 #[tauri::command]
