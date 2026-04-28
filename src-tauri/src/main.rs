@@ -13,6 +13,8 @@ use std::{
     thread,
     time::Duration,
 };
+use socket2::{Socket, Domain, Type, Protocol};
+use memmap2;
 use once_cell::sync::Lazy;
 use tauri::Emitter;
 use serde::Serialize;
@@ -311,9 +313,21 @@ fn do_scp_upload(
     local_path: &str,
     remote_dir: &str,
 ) -> Result<(), String> {
-    let tcp = TcpStream::connect(format!("{}:{}", host, port)).map_err(|e| e.to_string())?;
-    // Disable Nagle's algorithm: reduces latency for the many small SCP protocol writes
-    tcp.set_nodelay(true).ok();
+    // Build a tuned TCP socket: large kernel send buffer reduces blocking during encryption.
+    // SO_SNDBUF 4 MB lets the kernel pipeline data far ahead of the SSH encryption cycle.
+    let addr: SocketAddr = format!("{}:{}", host, port)
+        .to_socket_addrs()
+        .map_err(|e| e.to_string())?
+        .next()
+        .ok_or("Could not resolve host")?;
+    let domain = if addr.is_ipv6() { Domain::IPV6 } else { Domain::IPV4 };
+    let raw = Socket::new(domain, Type::STREAM, Some(Protocol::TCP)).map_err(|e| e.to_string())?;
+    raw.set_nodelay(true).ok();
+    raw.set_send_buffer_size(4 * 1024 * 1024).ok(); // 4 MB kernel send buffer
+    raw.set_recv_buffer_size(512 * 1024).ok();       // 512 KB recv (acks are tiny)
+    raw.connect(&addr.into()).map_err(|e| e.to_string())?;
+    let tcp: TcpStream = raw.into();
+
     let mut sess = Session::new().map_err(|e| e.to_string())?;
     sess.set_tcp_stream(tcp);
     sess.handshake().map_err(|e| e.to_string())?;
@@ -332,7 +346,6 @@ fn do_scp_upload(
     }
 
     use std::fs::File;
-    use std::io::BufReader;
 
     let total = std::fs::metadata(local_path).map_err(|e| e.to_string())?.len();
 
@@ -342,18 +355,27 @@ fn do_scp_upload(
         .to_string_lossy()
         .to_string();
 
-    // Sanitise remote_dir for shell safety: wrap in single quotes, escape embedded single quotes.
-    // This prevents path injection and handles spaces/special characters.
     let safe_dir = remote_dir.replace('\'', "'\\''"  );
-    // Resolve ~ on the remote side via the shell before invoking scp sink.
-    // The command expands the path then hands off to the scp sink protocol.
     let scp_cmd = format!("D='{safe_dir}'; mkdir -p \"$D\" 2>/dev/null; scp -t \"$D\"");
     let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
     channel.exec(&scp_cmd).map_err(|e| format!("SCP exec failed: {}", e))?;
 
-    // SCP protocol: send "C0644 <size> <filename>\n"
+    // SCP protocol step 1: wait for server's ready acknowledgment (0x00)
+    let mut ack = [0u8; 1];
+    channel.read_exact(&mut ack).map_err(|e| format!("SCP ack1 failed: {}", e))?;
+    if ack[0] != 0 {
+        return Err(format!("SCP server error after exec (code {})", ack[0]));
+    }
+
+    // SCP protocol step 2: send "C0644 <size> <filename>\n"
     let scp_header = format!("C0644 {} {}\n", total, filename);
     channel.write_all(scp_header.as_bytes()).map_err(|e| e.to_string())?;
+
+    // SCP protocol step 3: wait for server to accept the header (0x00)
+    channel.read_exact(&mut ack).map_err(|e| format!("SCP ack2 failed: {}", e))?;
+    if ack[0] != 0 {
+        return Err(format!("SCP server rejected file header (code {})", ack[0]));
+    }
 
     // Emit 0% immediately so the UI shows the transfer as started
     let _ = app.emit("sftp-progress", SftpProgress {
@@ -366,34 +388,44 @@ fn do_scp_upload(
         protocol: "scp".to_string(),
     });
 
-    // Stream file in 4MB chunks — avoids loading the entire file into RAM
-    const CHUNK_SIZE: usize = 4194304;
-    const PROGRESS_INTERVAL: u64 = 524288; // emit every 512KB
+    // READ_BUF: large enough to amortise read() syscalls.
+    // WRITE_CHUNK: 128 KB — fits within the typical 2 MB libssh2 channel window,
+    //   keeps the window from draining and avoids long blocking waits.
+    const WRITE_CHUNK: usize = 131072;           // 128 KB SSH write granularity
+    const PROGRESS_INTERVAL: u64 = 524288;       // emit every 512 KB
 
     let file = File::open(local_path).map_err(|e| e.to_string())?;
-    let mut reader = BufReader::with_capacity(CHUNK_SIZE, file);
     let mut offset: u64 = 0;
     let mut last_progress: u64 = 0;
-    let mut chunk_buf = vec![0u8; CHUNK_SIZE];
 
-    loop {
-        use std::io::Read as _;
-        let n = reader.read(&mut chunk_buf).map_err(|e| e.to_string())?;
-        if n == 0 { break; }
-        channel.write_all(&chunk_buf[..n]).map_err(|e| e.to_string())?;
-        offset += n as u64;
+    // Memory-map the file: the OS prefetches pages into RAM transparently,
+    // eliminating repeated read() syscalls and the kernel→user copy overhead.
+    // Falls back to regular read() for zero-length files (mmap of 0 bytes is UB).
+    if total == 0 {
+        // Nothing to send — fall through to the EOF marker below.
+    } else {
+        // SAFETY: we do not mutate the mapping and the file is not truncated during transfer.
+        let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| e.to_string())?;
+        let data: &[u8] = &mmap;
 
-        if offset - last_progress >= PROGRESS_INTERVAL || offset >= total {
-            last_progress = offset;
-            let _ = app.emit("sftp-progress", SftpProgress {
-                id: transfer_id.to_string(),
-                bytes_sent: offset,
-                total,
-                done: false,
-                error: None,
-                remote_path: None,
-                protocol: "scp".to_string(),
-            });
+        while offset < total {
+            let end = ((offset + WRITE_CHUNK as u64) as usize).min(data.len());
+            let chunk = &data[offset as usize..end];
+            channel.write_all(chunk).map_err(|e| e.to_string())?;
+            offset += chunk.len() as u64;
+
+            if offset - last_progress >= PROGRESS_INTERVAL || offset >= total {
+                last_progress = offset;
+                let _ = app.emit("sftp-progress", SftpProgress {
+                    id: transfer_id.to_string(),
+                    bytes_sent: offset,
+                    total,
+                    done: false,
+                    error: None,
+                    remote_path: None,
+                    protocol: "scp".to_string(),
+                });
+            }
         }
     }
 
