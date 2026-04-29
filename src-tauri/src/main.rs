@@ -25,7 +25,20 @@ type Sender = mpsc::Sender<InputMessage>;
 
 static SESS_TX: Lazy<Mutex<HashMap<String, Sender>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
+/// Keyboard-interactive authenticator that answers every prompt with the stored password.
+/// Used as fallback when `userauth_password` is rejected (PAM / ChallengeResponseAuthentication).
+struct PasswordKbdAuth(String);
 
+impl ssh2::KeyboardInteractivePrompt for PasswordKbdAuth {
+    fn prompt<'a>(
+        &mut self,
+        _username: &str,
+        _instructions: &str,
+        prompts: &[ssh2::Prompt<'a>],
+    ) -> Vec<String> {
+        prompts.iter().map(|_| self.0.clone()).collect()
+    }
+}
 
 enum InputMessage {
     Data(Vec<u8>),
@@ -103,12 +116,21 @@ fn start_ssh_session(
                             }
                         }
                         if !authed {
-                            match sess.userauth_password(&user, &pass) {
-                                Ok(_) if sess.authenticated() => authed = true,
-                                Err(e) => {
-                                                    let _ = app.emit(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: format!("\r\npassword auth error: {}\r\n", e) });
-                                                }
-                                _ => {}
+                            // Try plain password auth first
+                            let pwd_ok = sess.userauth_password(&user, &pass)
+                                .is_ok() && sess.authenticated();
+                            if pwd_ok {
+                                authed = true;
+                            } else {
+                                // Fallback: keyboard-interactive (PAM servers, ChallengeResponseAuthentication)
+                                let mut kbd = PasswordKbdAuth(pass.clone());
+                                match sess.userauth_keyboard_interactive(&user, &mut kbd) {
+                                    Ok(_) if sess.authenticated() => authed = true,
+                                    Err(e) => {
+                                        let _ = app.emit(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: format!("\r\npassword auth error: {}\r\n", e) });
+                                    }
+                                    _ => {}
+                                }
                             }
                         }
 
