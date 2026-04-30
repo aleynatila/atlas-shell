@@ -26,6 +26,8 @@ jobs:
 
       - name: Build Tauri app
         run: npm run tauri:build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v1
