@@ -20,6 +20,7 @@ use tauri::Emitter;
 use serde::Serialize;
 use uuid::Uuid;
 use keyring::Entry;
+use zeroize::{Zeroizing, ZeroizeOnDrop};
 
 type Sender = mpsc::Sender<InputMessage>;
 
@@ -27,6 +28,7 @@ static SESS_TX: Lazy<Mutex<HashMap<String, Sender>>> = Lazy::new(|| Mutex::new(H
 
 /// Keyboard-interactive authenticator that answers every prompt with the stored password.
 /// Used as fallback when `userauth_password` is rejected (PAM / ChallengeResponseAuthentication).
+#[derive(ZeroizeOnDrop)]
 struct PasswordKbdAuth(String);
 
 impl ssh2::KeyboardInteractivePrompt for PasswordKbdAuth {
@@ -74,6 +76,11 @@ fn start_ssh_session(
     let app = app_handle.clone();
     let session_id_clone = session_id.clone();
     thread::spawn(move || {
+        let pass = Zeroizing::new(pass);
+        let event_name = format!("ssh-output-{}", session_id_clone);
+        let emit_err = |msg: String| {
+            let _ = app.emit(&event_name, SshOutput { session: session_id_clone.clone(), output: msg });
+        };
         let addr_str = format!("{}:{}", host, port);
         // Try parsing directly as IP:port first (avoids DNS for IP addresses)
         let tcp_result = addr_str.parse::<SocketAddr>()
@@ -101,34 +108,30 @@ fn start_ssh_session(
                     sess.set_timeout(15_000);
                     sess.set_tcp_stream(tcp);
                     if let Err(e) = sess.handshake() {
-                        let _ = app.emit(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: format!("handshake failed: {}", e) });
+                        emit_err(format!("handshake failed: {}", e));
                     } else {
                         let mut authed = false;
-                        if let Some(kp) = key_path.clone() {
-                            let pk = Path::new(&kp);
+                        if let Some(ref kp) = key_path {
+                            let pk = Path::new(kp);
                             let passphrase = key_passphrase.as_deref();
                             match sess.userauth_pubkey_file(&user, None, pk, passphrase) {
                                 Ok(_) if sess.authenticated() => authed = true,
-                                Err(e) => {
-                                                    let _ = app.emit(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: format!("pubkey auth error: {}", e) });
-                                                }
+                                Err(e) => emit_err(format!("pubkey auth error: {}", e)),
                                 _ => {}
                             }
                         }
                         if !authed {
                             // Try plain password auth first
-                            let pwd_ok = sess.userauth_password(&user, &pass)
+                            let pwd_ok = sess.userauth_password(&user, &*pass)
                                 .is_ok() && sess.authenticated();
                             if pwd_ok {
                                 authed = true;
                             } else {
                                 // Fallback: keyboard-interactive (PAM servers, ChallengeResponseAuthentication)
-                                let mut kbd = PasswordKbdAuth(pass.clone());
+                                let mut kbd = PasswordKbdAuth((*pass).clone());
                                 match sess.userauth_keyboard_interactive(&user, &mut kbd) {
                                     Ok(_) if sess.authenticated() => authed = true,
-                                    Err(e) => {
-                                        let _ = app.emit(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: format!("\r\npassword auth error: {}\r\n", e) });
-                                    }
+                                    Err(e) => emit_err(format!("\r\npassword auth error: {}\r\n", e)),
                                     _ => {}
                                 }
                             }
@@ -144,58 +147,79 @@ fn start_ssh_session(
                                     // Send SSH-level keepalive every 30s to prevent server-side idle drops
                                     let _ = sess.set_keepalive(true, 30);
                                     sess.set_blocking(false);
-                                    let mut buf = [0u8; 32768];
-                                    // Incomplete multi-byte UTF-8 sequence carried over from last read
+                                    // 64 KB: 2× the previous size — halves read() round-trips for
+                                    // bulk output while staying well within libssh2's 2 MB channel window.
+                                    let mut buf = [0u8; 65536];
+                                    // Scratch buffer reused every read — avoids per-read Vec alloc.
+                                    // +4 for the at-most-3-byte UTF-8 carry from the previous read.
+                                    let mut raw: Vec<u8> = Vec::with_capacity(65536 + 4);
+                                    // At most 3 bytes of an incomplete multi-byte UTF-8 sequence.
                                     let mut utf8_remainder: Vec<u8> = Vec::new();
+                                    // Accumulates one batch of output; taken (not cloned) into each emit.
+                                    let mut combined = String::new();
                                     let mut keepalive_timer = std::time::Instant::now();
                                     loop {
-                                        // Coalesce consecutive reads into one IPC event to reduce
-                                        // frontend message overhead during high-throughput output.
-                                        let mut combined = String::new();
+                                        // Coalesce up to 16 consecutive reads into one IPC event to halve
+                                        // frontend message overhead vs the previous 8-read limit.
+                                        combined.clear();
                                         let mut got_data = false;
-                                        for _ in 0..8 {
+                                        for _ in 0..16 {
                                             match channel.read(&mut buf) {
                                                 Ok(n) if n > 0 => {
                                                     got_data = true;
-                                                    // Prepend any leftover bytes from the previous read
-                                                    let mut raw = utf8_remainder.clone();
+                                                    // Move remainder bytes into raw without cloning —
+                                                    // append() is a memcpy of ≤3 bytes, never allocates.
+                                                    raw.clear();
+                                                    raw.append(&mut utf8_remainder);
                                                     raw.extend_from_slice(&buf[..n]);
-                                                    utf8_remainder.clear();
-                                                    // Find the largest valid UTF-8 prefix; carry the rest
+                                                    // Find the largest valid UTF-8 prefix; carry the rest.
                                                     let valid_end = match std::str::from_utf8(&raw) {
                                                         Ok(_) => raw.len(),
                                                         Err(e) => e.valid_up_to(),
                                                     };
                                                     utf8_remainder.extend_from_slice(&raw[valid_end..]);
                                                     // SAFETY: valid_end is a valid UTF-8 boundary
+                                                    debug_assert!(std::str::from_utf8(&raw[..valid_end]).is_ok(), "UTF-8 boundary miscalculated");
                                                     combined.push_str(unsafe { std::str::from_utf8_unchecked(&raw[..valid_end]) });
                                                 }
                                                 _ => break,
                                             }
                                         }
                                         if !combined.is_empty() {
-                                            let event_name = format!("ssh-output-{}", session_id_clone);
-                                            let _ = app.emit(event_name.as_str(), SshOutput { session: session_id_clone.clone(), output: combined });
+                                            // take() moves the buffer into the event without copying;
+                                            // combined is replaced with an empty String (no alloc here).
+                                            let _ = app.emit(&event_name, SshOutput {
+                                                session: session_id_clone.clone(),
+                                                output: std::mem::take(&mut combined),
+                                            });
                                         }
 
-                                        match rx.try_recv() {
-                                            Ok(InputMessage::Data(d)) => {
-                                                sess.set_blocking(true);
-                                                let _ = channel.write_all(&d);
-                                                let _ = channel.flush();
-                                                sess.set_blocking(false);
+                                        // Drain all pending input in a single blocking window —
+                                        // eliminates redundant set_blocking syscalls and ensures
+                                        // pasted text is flushed atomically rather than chunk-per-tick.
+                                        let mut should_close = false;
+                                        sess.set_blocking(true);
+                                        loop {
+                                            match rx.try_recv() {
+                                                Ok(InputMessage::Data(d)) => {
+                                                    let _ = channel.write_all(&d);
+                                                }
+                                                Ok(InputMessage::Resize(c, r)) => {
+                                                    let _ = channel.request_pty_size(c, r, None, None);
+                                                }
+                                                Ok(InputMessage::Close) | Err(mpsc::TryRecvError::Disconnected) => {
+                                                    should_close = true;
+                                                    break;
+                                                }
+                                                Err(mpsc::TryRecvError::Empty) => break,
                                             }
-                                            Ok(InputMessage::Resize(c, r)) => {
-                                                sess.set_blocking(true);
-                                                let _ = channel.request_pty_size(c, r, None, None);
-                                                sess.set_blocking(false);
-                                            }
-                                            Ok(InputMessage::Close) | Err(mpsc::TryRecvError::Disconnected) => {
-                                                sess.set_blocking(true);
-                                                let _ = channel.close();
-                                                break;
-                                            }
-                                            Err(mpsc::TryRecvError::Empty) => {}
+                                        }
+                                        let _ = channel.flush();
+                                        sess.set_blocking(false);
+                                        if should_close {
+                                            sess.set_blocking(true);
+                                            let _ = channel.close();
+                                            break;
                                         }
 
                                         // Send SSH keepalive every 25s (before server's 30s idle timeout)
@@ -215,25 +239,21 @@ fn start_ssh_session(
                                         }
                                     }
                                 }
-                                Err(err) => {
-                                    let _ = app.emit(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: format!("\r\nchannel error: {}\r\n", err) });
-                                }
+                                Err(err) => emit_err(format!("\r\nchannel error: {}\r\n", err)),
                             }
                         } else {
-                            let _ = app.emit(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: "\r\nauthentication failed\r\n".into() });
+                            emit_err("\r\nauthentication failed\r\n".into());
                         }
                     }
                 } else {
-                    let _ = app.emit(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: "\r\nsession init failed\r\n".into() });
+                    emit_err("\r\nsession init failed\r\n".into());
                 }
             }
-            Err(e) => {
-                let _ = app.emit(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: format!("\r\ntcp connect failed: {}\r\n", e) });
-            }
+            Err(e) => emit_err(format!("\r\ntcp connect failed: {}\r\n", e)),
         }
 
         if let Ok(mut map) = SESS_TX.lock() { map.remove(&session_id_clone); }
-        let _ = app.emit(format!("ssh-output-{}", session_id_clone).as_str(), SshOutput { session: session_id_clone.clone(), output: "[disconnected]".into() });
+        let _ = app.emit(&event_name, SshOutput { session: session_id_clone.clone(), output: "[disconnected]".into() });
     });
 
     Ok(session_id)
@@ -241,28 +261,26 @@ fn start_ssh_session(
 
 #[tauri::command]
 fn send_ssh_input(session_id: String, input: String) -> Result<(), String> {
-    let map = SESS_TX.lock().map_err(|_| "lock poisoned".to_string())?;
-    if let Some(tx) = map.get(&session_id) {
-        tx.send(InputMessage::Data(input.into_bytes())).map_err(|e| e.to_string())
-    } else {
-        Err("session not found".into())
+    let tx = SESS_TX.lock().map_err(|_| "lock poisoned".to_string())?.get(&session_id).cloned();
+    match tx {
+        Some(tx) => tx.send(InputMessage::Data(input.into_bytes())).map_err(|e| e.to_string()),
+        None => Err("session not found".into()),
     }
 }
 
 #[tauri::command]
 fn resize_pty(session_id: String, cols: u32, rows: u32) -> Result<(), String> {
-    let map = SESS_TX.lock().map_err(|_| "lock poisoned".to_string())?;
-    if let Some(tx) = map.get(&session_id) {
-        tx.send(InputMessage::Resize(cols, rows)).map_err(|e| e.to_string())
-    } else {
-        Err("session not found".into())
+    let tx = SESS_TX.lock().map_err(|_| "lock poisoned".to_string())?.get(&session_id).cloned();
+    match tx {
+        Some(tx) => tx.send(InputMessage::Resize(cols, rows)).map_err(|e| e.to_string()),
+        None => Err("session not found".into()),
     }
 }
 
 #[tauri::command]
 fn stop_ssh_session(session_id: String) -> Result<(), String> {
-    let mut map = SESS_TX.lock().map_err(|_| "lock poisoned".to_string())?;
-    if let Some(tx) = map.remove(&session_id) {
+    let tx = SESS_TX.lock().map_err(|_| "lock poisoned".to_string())?.remove(&session_id);
+    if let Some(tx) = tx {
         tx.send(InputMessage::Close).map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -282,7 +300,7 @@ struct SftpProgress {
 }
 
 #[tauri::command]
-fn upload_file_sftp(
+fn upload_file_scp(
     app_handle: tauri::AppHandle,
     transfer_id: String,
     host: String,
@@ -304,8 +322,9 @@ fn upload_file_sftp(
         protocol: "scp".to_string(),
     });
     thread::spawn(move || {
+        let pass = Zeroizing::new(pass);
         let result = do_scp_upload(
-            &app_handle, &transfer_id, &host, port, &user, &pass,
+            &app_handle, &transfer_id, &host, port, &user, &*pass,
             key_path.as_deref(), &local_path, &remote_dir,
         );
         if let Err(e) = result {
@@ -361,10 +380,20 @@ fn do_scp_upload(
         }
     }
     if !authed {
-        sess.userauth_password(user, pass).map_err(|e| e.to_string())?;
-        if !sess.authenticated() {
-            return Err("SCP authentication failed".into());
+        let pwd_ok = sess.userauth_password(user, pass).is_ok() && sess.authenticated();
+        if pwd_ok {
+            authed = true;
+        } else {
+            // Keyboard-interactive fallback for PAM / ChallengeResponseAuthentication servers,
+            // matching the same auth chain used by start_ssh_session.
+            let mut kbd = PasswordKbdAuth(pass.to_string());
+            if sess.userauth_keyboard_interactive(user, &mut kbd).is_ok() && sess.authenticated() {
+                authed = true;
+            }
         }
+    }
+    if !authed {
+        return Err("SCP authentication failed".into());
     }
 
     use std::fs::File;
@@ -461,9 +490,10 @@ fn do_scp_upload(
 /// Store a password in the OS keychain (Windows Credential Manager / macOS Keychain / SecretService)
 #[tauri::command]
 fn set_credential(id: String, password: String) -> Result<(), String> {
+    let password = Zeroizing::new(password);
     Entry::new("atlas", &id)
         .map_err(|e| e.to_string())?
-        .set_password(&password)
+        .set_password(&*password)
         .map_err(|e| e.to_string())
 }
 
@@ -506,7 +536,7 @@ fn main() {
         send_ssh_input,
         stop_ssh_session,
         resize_pty,
-        upload_file_sftp,
+        upload_file_scp,
         set_credential,
         get_credential,
         delete_credential,

@@ -37,6 +37,25 @@ export interface SshOutputPayload {
   output: string;
 }
 
+export interface SftpProgressPayload {
+  id: string;
+  bytes_sent: number;
+  total: number;
+  done: boolean;
+  error?: string;
+  remote_path?: string;
+  protocol?: string;
+}
+
+export interface DragDropPayload {
+  paths?: string[];
+  position?: { x: number; y: number };
+}
+
+export interface DragOverPayload {
+  position?: { x: number; y: number };
+}
+
 export interface SessionEntry {
   id: string;
   label: string;

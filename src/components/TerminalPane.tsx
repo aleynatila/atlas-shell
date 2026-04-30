@@ -11,7 +11,14 @@ import { FitAddon } from "xterm-addon-fit";
 import { WebglAddon } from "xterm-addon-webgl";
 import "xterm/css/xterm.css";
 import { TERMINAL_THEME } from "../themes";
-import type { SshOutputPayload, TabPane, TransferMap } from "../types";
+import type {
+    DragDropPayload,
+    DragOverPayload,
+    SftpProgressPayload,
+    SshOutputPayload,
+    TabPane,
+    TransferMap,
+} from "../types";
 import { SftpToast } from "./SftpToast";
 
 interface TerminalPaneProps {
@@ -239,11 +246,10 @@ export const TerminalPane = memo(function TerminalPane({
 
     Promise.all([
       listenSafe("tauri://drag-drop", (e) => {
-        const payload = e.payload as {
-          paths?: string[];
-          position?: { x: number; y: number };
-        };
-        const paths = payload.paths ?? (e.payload as string[]);
+        const payload = e.payload as DragDropPayload;
+        const paths =
+          payload.paths ??
+          (Array.isArray(e.payload) ? (e.payload as string[]) : []);
         const pos = payload.position;
 
         // If position info is available, only handle the drop if it landed
@@ -270,7 +276,7 @@ export const TerminalPane = memo(function TerminalPane({
       }),
       listenSafe("tauri://drag-over", (e) => {
         if ((window as any).__tabDragging) return;
-        const payload = e.payload as { position?: { x: number; y: number } };
+        const payload = e.payload as DragOverPayload;
         const pos = payload?.position;
         // Only light up the overlay for the pane under the cursor.
         if (pos) {
@@ -301,15 +307,7 @@ export const TerminalPane = memo(function TerminalPane({
     let mounted = true;
 
     listenSafe("sftp-progress", (e) => {
-      const p = e.payload as {
-        id: string;
-        bytes_sent: number;
-        total: number;
-        done: boolean;
-        error?: string;
-        remote_path?: string;
-        protocol?: string;
-      };
+      const p = e.payload as SftpProgressPayload;
       setSftpTransfers((prev) => {
         // Only handle progress for transfers THIS pane started.
         // app.emit_all() broadcasts to all webviews; ignoring unknown IDs
@@ -354,7 +352,7 @@ export const TerminalPane = memo(function TerminalPane({
       const id = crypto.randomUUID();
       const name = fp.split(/[\\/]/).pop() || fp;
       transfers[id] = { name, progress: 0, done: false };
-      invokeSafe("upload_file_sftp", {
+      invokeSafe("upload_file_scp", {
         transferId: id,
         host: pane.sessionEntry.host,
         port: pane.sessionEntry.port,

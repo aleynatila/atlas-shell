@@ -1,11 +1,11 @@
 {
-  "version": "0.4.3",
-  "notes": "Atlas v0.4.3 - Native SCP (no file corruption), mmap file transfers, tab squeeze, active tab fix",
-  "pub_date": "2026-04-28T16:46:00Z",
+  "version": "0.4.4",
+  "notes": "Atlas v0.4.4 - Security hardening, SCP auth fix for PAM servers, SSH throughput improvements",
+  "pub_date": "2026-04-30T00:00:00Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUL05IZXhDUnYzMWFMNVdsT3A0Y0ZLenV2ZmFvVjJOSDdHTHdlUzFUTXNGcG4vSUNTR3l5MW9wSHYvR2RLTlZLenFmcFpSeTh1WkVqakF6MDdRdk1FODYyVStCaXcxSGdBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc3Mzg0MDAzCWZpbGU6YXRsYXNfMC40LjNfeDY0LXNldHVwLmV4ZQo4OTVsaTZQdXNZNnVlaDh4SGZxQjB1alQ5eTB0bjE5ZTRWSVVwdXo5bkpwK0J5MzA2SXpVemJYY20rQ3RCbElnWW14N0pSTy9FK2c3MlRReEk4bHBEUT09Cg==",
-      "url": "https://github.com/aleynatila/atlas-shell/releases/download/v0.4.3/atlas_0.4.3_x64-setup.exe"
+      "signature": "",
+      "url": "https://github.com/aleynatila/atlas-shell/releases/download/v0.4.4/atlas_0.4.4_x64-setup.exe"
     }
   }
 }
