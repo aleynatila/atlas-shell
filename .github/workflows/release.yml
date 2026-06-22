@@ -27,6 +27,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: "src-tauri -> target"
+          shared-key: "tauri-${{ runner.os }}"
 
       - name: Install frontend dependencies
         run: npm ci
