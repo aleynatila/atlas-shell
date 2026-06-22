@@ -1,12 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import {
-  useCallback,
-  useDeferredValue,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
+    useCallback,
+    useDeferredValue,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
 } from "react";
 import "xterm/css/xterm.css";
 import { NewSession } from "./components/NewSession";
@@ -15,32 +15,31 @@ import { Settings } from "./components/Settings";
 import { StatusBar } from "./components/StatusBar";
 import { TabBar } from "./components/TabBar";
 import { TerminalPane } from "./components/TerminalPane";
+import { useCustomThemes } from "./hooks/useCustomThemes";
+import { useSessionVault } from "./hooks/useSessionVault";
+import {
+    useGeneralSettings,
+    useScripts,
+    useTags,
+} from "./hooks/useSettingsState";
+import { useViewRouter } from "./hooks/useViewRouter";
 import "./index.css";
 import { getTheme, THEMES } from "./themes";
-import {
-  NEON_COLORS,
-  type Credential,
-  type GeneralSettings,
-  type SessionEntry,
-  type TabPane,
-} from "./types";
+import { NEON_COLORS, type SessionEntry, type TabPane } from "./types";
 
 // ── App ───────────────────────────────────────────────────────────────────────
 
 function App() {
-  const [sessions, setSessions] = useState<SessionEntry[]>(() => {
-    try {
-      return JSON.parse(localStorage.getItem("atlas_sessions") || "[]");
-    } catch {
-      return [];
-    }
-  });
+  const { sessions, setSessions, saveSessions, credentials, saveCredentials } =
+    useSessionVault();
 
   const [tabs, setTabs] = useState<TabPane[]>([]);
-  const [activeView, setActiveView] = useState<string>("overview");
-  const [openViews, setOpenViews] = useState<
-    Set<"overview" | "settings" | "new-session">
-  >(() => new Set(["overview"] as const));
+  // Stable ref for tabs — declared early so useViewRouter can fall back to
+  // the most-recent tab when closing the active fixed view.
+  const tabsRef = useRef<TabPane[]>([]);
+  tabsRef.current = tabs;
+  const { activeView, setActiveView, openViews, openView, closeView } =
+    useViewRouter(() => tabsRef.current.map((t) => t.tabId));
   const [settingsTab, setSettingsTab] = useState<
     | "sessions"
     | "credentials"
@@ -55,7 +54,7 @@ function App() {
   const [splitTabs, setSplitTabs] = useState<
     Record<string, "horizontal" | "vertical">
   >({});
-  const [selectedColor, setSelectedColor] = useState(NEON_COLORS[0]);
+  const [selectedColor, setSelectedColor] = useState(NEON_COLORS[0]!);
   const [form, setForm] = useState({
     label: "",
     host: "",
@@ -81,63 +80,12 @@ function App() {
     group: "",
     credentialId: "",
   });
-  const [editSelectedColor, setEditSelectedColor] = useState(NEON_COLORS[0]);
+  const [editSelectedColor, setEditSelectedColor] = useState(NEON_COLORS[0]!);
 
-  const [credentials, setCredentials] = useState<Credential[]>(() => {
-    try {
-      return JSON.parse(localStorage.getItem("atlas_credentials") || "[]");
-    } catch {
-      return [];
-    }
-  });
-  const [tags, setTags] = useState<import("./types").Tag[]>(() => {
-    try {
-      return JSON.parse(localStorage.getItem("atlas_tags") || "[]");
-    } catch {
-      return [];
-    }
-  });
-  const [scripts, setScripts] = useState<import("./types").Script[]>(() => {
-    try {
-      return JSON.parse(localStorage.getItem("atlas_scripts") || "[]");
-    } catch {
-      return [];
-    }
-  });
-  const [generalSettings, setGeneralSettings] = useState<GeneralSettings>(
-    () => {
-      try {
-        const saved = JSON.parse(
-          localStorage.getItem("atlas_general") || "null",
-        );
-        if (saved) {
-          if (!saved.theme) {
-            saved.theme = saved.darkMode ? "dark" : "light";
-          }
-          return saved as GeneralSettings;
-        }
-        return {
-          logPath: "",
-          fontSize: 15,
-          fontFamily: "'Cascadia Mono', Consolas, monospace",
-          theme: "light",
-          autoCheckUpdates: false,
-          updatePermissionAsked: false,
-          disableAlternateScreen: false,
-        };
-      } catch {
-        return {
-          logPath: "",
-          fontSize: 15,
-          fontFamily: "'Cascadia Mono', Consolas, monospace",
-          theme: "light",
-          autoCheckUpdates: false,
-          updatePermissionAsked: false,
-          disableAlternateScreen: false,
-        };
-      }
-    },
-  );
+  const { tags, saveTags } = useTags();
+  const { scripts, saveScripts } = useScripts();
+  const { generalSettings, saveGeneral } = useGeneralSettings();
+  const { customThemes, importTheme, removeTheme } = useCustomThemes();
 
   const [importStatus, setImportStatus] = useState<string | null>(null);
 
@@ -147,88 +95,37 @@ function App() {
   >({});
 
   // Stable refs for useCallback closures
-  const tabsRef = useRef(tabs);
-  tabsRef.current = tabs;
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
+  const splitTabsRef = useRef(splitTabs);
+  splitTabsRef.current = splitTabs;
   const activeViewRef = useRef(activeView);
   activeViewRef.current = activeView;
   const openViewsRef = useRef(openViews);
   openViewsRef.current = openViews;
-  const splitTabsRef = useRef(splitTabs);
-  splitTabsRef.current = splitTabs;
-
-  // Debounce timers for localStorage/keychain writes
-  const saveSessionsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null,
-  );
-  const saveCredsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // ── Keychain migration + load ──
-  useEffect(() => {
-    (async () => {
-      const enrichedCreds = await Promise.all(
-        credentials.map(async (c) => {
-          if (c.pass) {
-            await invoke("set_credential", {
-              id: "cred_" + c.id,
-              password: c.pass,
-            }).catch(() => {});
-          }
-          const stored = await invoke<string | null>("get_credential", {
-            id: "cred_" + c.id,
-          }).catch(() => null);
-          return { ...c, pass: stored ?? c.pass };
-        }),
-      );
-      setCredentials(enrichedCreds);
-      try {
-        localStorage.setItem(
-          "atlas_credentials",
-          JSON.stringify(enrichedCreds.map(({ pass: _p, ...rest }) => rest)),
-        );
-      } catch {}
-
-      const enrichedSessions = await Promise.all(
-        sessions.map(async (s) => {
-          if (!s.credentialId) {
-            if (s.pass) {
-              await invoke("set_credential", {
-                id: "sess_" + s.id,
-                password: s.pass,
-              }).catch(() => {});
-            }
-            const stored = await invoke<string | null>("get_credential", {
-              id: "sess_" + s.id,
-            }).catch(() => null);
-            return { ...s, pass: stored ?? s.pass };
-          }
-          const cred = enrichedCreds.find((c) => c.id === s.credentialId);
-          return { ...s, pass: cred?.pass };
-        }),
-      );
-      setSessions(enrichedSessions);
-      try {
-        localStorage.setItem(
-          "atlas_sessions",
-          JSON.stringify(enrichedSessions.map(({ pass: _p, ...rest }) => rest)),
-        );
-      } catch {}
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   // Apply theme
   useEffect(() => {
     const html = document.documentElement;
-    html.classList.remove("dark", ...THEMES.map((t) => `theme-${t.id}`));
-    const theme = generalSettings.theme ?? "light";
-    if (theme === "dark") {
+    const customIds = customThemes.map((t) => `theme-${t.id}`);
+    html.classList.remove(
+      "dark",
+      ...THEMES.map((t) => `theme-${t.id}`),
+      ...customIds,
+    );
+    const themeId = generalSettings.theme ?? "light";
+    // Resolve `isDark` from either the built-in set or the custom set so
+    // the `.dark` utility class still tracks light/dark for downstream UI.
+    const resolved =
+      THEMES.find((t) => t.id === themeId) ??
+      customThemes.find((t) => t.id === themeId);
+    if (themeId === "dark") {
       html.classList.add("dark", "theme-dark");
-    } else if (theme !== "light") {
-      html.classList.add(`theme-${theme}`);
+    } else if (themeId !== "light") {
+      html.classList.add(`theme-${themeId}`);
+      if (resolved?.isDark) html.classList.add("dark");
     }
-  }, [generalSettings.theme]);
+  }, [generalSettings.theme, customThemes]);
 
   // Detach URL param
   useEffect(() => {
@@ -254,72 +151,8 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Persistence helpers (stable — no state closures) ──
-  const saveSessions = useCallback((list: SessionEntry[]) => {
-    setSessions(list);
-    if (saveSessionsTimerRef.current)
-      clearTimeout(saveSessionsTimerRef.current);
-    saveSessionsTimerRef.current = setTimeout(() => {
-      try {
-        localStorage.setItem(
-          "atlas_sessions",
-          JSON.stringify(list.map(({ pass: _p, ...rest }) => rest)),
-        );
-      } catch {}
-      list.forEach((s) => {
-        if (!s.credentialId) {
-          if (s.pass) {
-            invoke("set_credential", {
-              id: "sess_" + s.id,
-              password: s.pass,
-            }).catch(() => {});
-          } else {
-            invoke("delete_credential", { id: "sess_" + s.id }).catch(() => {});
-          }
-        }
-      });
-    }, 400);
-  }, []);
-  const saveCredentials = useCallback((list: Credential[]) => {
-    setCredentials(list);
-    if (saveCredsTimerRef.current) clearTimeout(saveCredsTimerRef.current);
-    saveCredsTimerRef.current = setTimeout(() => {
-      try {
-        localStorage.setItem(
-          "atlas_credentials",
-          JSON.stringify(list.map(({ pass: _p, ...rest }) => rest)),
-        );
-      } catch {}
-      list.forEach((c) => {
-        if (c.pass) {
-          invoke("set_credential", {
-            id: "cred_" + c.id,
-            password: c.pass,
-          }).catch(() => {});
-        } else {
-          invoke("delete_credential", { id: "cred_" + c.id }).catch(() => {});
-        }
-      });
-    }, 400);
-  }, []);
-  const saveTags = useCallback((list: import("./types").Tag[]) => {
-    setTags(list);
-    try {
-      localStorage.setItem("atlas_tags", JSON.stringify(list));
-    } catch {}
-  }, []);
-  const saveScripts = useCallback((list: import("./types").Script[]) => {
-    setScripts(list);
-    try {
-      localStorage.setItem("atlas_scripts", JSON.stringify(list));
-    } catch {}
-  }, []);
-  const saveGeneral = useCallback((s: GeneralSettings) => {
-    setGeneralSettings(s);
-    try {
-      localStorage.setItem("atlas_general", JSON.stringify(s));
-    } catch {}
-  }, []);
+  // saveSessions / saveCredentials are provided by useSessionVault above.
+  // saveTags / saveScripts / saveGeneral are provided by their respective hooks above.
 
   // ── Session CRUD ──
   function addSession() {
@@ -349,20 +182,23 @@ function App() {
       group: "",
       credentialId: "",
     });
-    setSelectedColor(NEON_COLORS[0]);
+    setSelectedColor(NEON_COLORS[0]!);
     return true;
   }
 
-  const removeSession = useCallback((id: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    const updated = sessionsRef.current.filter((s) => s.id !== id);
-    setSessions(updated);
-    try {
-      localStorage.setItem("atlas_sessions", JSON.stringify(updated));
-    } catch {}
-    // Clean up keychain entry so credentials don't linger after session deletion
-    invoke("delete_credential", { id: `sess_${id}` }).catch(() => {});
-  }, []);
+  const removeSession = useCallback(
+    (id: string, e: React.MouseEvent) => {
+      e.stopPropagation();
+      const updated = sessionsRef.current.filter((s) => s.id !== id);
+      setSessions(updated);
+      try {
+        localStorage.setItem("atlas_sessions", JSON.stringify(updated));
+      } catch {}
+      // Clean up keychain entry so credentials don't linger after session deletion
+      invoke("delete_credential", { id: `sess_${id}` }).catch(() => {});
+    },
+    [setSessions],
+  );
 
   function updateSession() {
     if (!editingSession || !editForm.host) return;
@@ -386,52 +222,29 @@ function App() {
   }
 
   // ── View / Tab management ──
-  const openView = useCallback(
-    (kind: "overview" | "settings" | "new-session") => {
-      setOpenViews((prev) => {
-        if (prev.has(kind)) return prev;
-        return new Set([...prev, kind]);
-      });
-      setActiveView((prev) => (prev === kind ? prev : kind));
-    },
-    [],
-  );
-  const closeView = useCallback(
-    (kind: "overview" | "settings" | "new-session") => {
-      setOpenViews((prev) => {
-        const next = new Set(prev);
-        next.delete(kind);
-        return next;
-      });
-      if (activeViewRef.current === kind) {
-        const other = [...openViewsRef.current].find((v) => v !== kind);
-        if (other) setActiveView(other);
-        else if (tabsRef.current.length > 0)
-          setActiveView(tabsRef.current[tabsRef.current.length - 1].tabId);
-        else setActiveView("");
-      }
-    },
-    [],
-  );
+  // (openView / closeView provided by useViewRouter above)
 
-  const openTab = useCallback((entry: SessionEntry, autoConnect = true) => {
-    const existing = tabsRef.current.find(
-      (t) => t.sessionEntry.id === entry.id,
-    );
-    if (existing) {
-      setActiveView(existing.tabId);
-      return;
-    }
-    const tab: TabPane = {
-      tabId: crypto.randomUUID(),
-      sessionEntry: entry,
-      sshSessionId: null,
-      connected: false,
-    };
-    setTabs((prev) => [...prev, tab]);
-    setActiveView(tab.tabId);
-    if (autoConnect) setAutoConnectTabId(tab.tabId);
-  }, []);
+  const openTab = useCallback(
+    (entry: SessionEntry, autoConnect = true) => {
+      const existing = tabsRef.current.find(
+        (t) => t.sessionEntry.id === entry.id,
+      );
+      if (existing) {
+        setActiveView(existing.tabId);
+        return;
+      }
+      const tab: TabPane = {
+        tabId: crypto.randomUUID(),
+        sessionEntry: entry,
+        sshSessionId: null,
+        connected: false,
+      };
+      setTabs((prev) => [...prev, tab]);
+      setActiveView(tab.tabId);
+      if (autoConnect) setAutoConnectTabId(tab.tabId);
+    },
+    [setActiveView],
+  );
 
   const closeTabById = useCallback(
     (tabId: string) => {
@@ -439,7 +252,7 @@ function App() {
       setTabs(remaining);
       if (activeViewRef.current === tabId) {
         if (remaining.length > 0)
-          setActiveView(remaining[remaining.length - 1].tabId);
+          setActiveView(remaining[remaining.length - 1]!.tabId);
         else openView("overview");
       }
       if (remaining.length === 0 && !openViewsRef.current.has("overview"))
@@ -454,7 +267,7 @@ function App() {
       delete paneRefCallbacks.current[tabId];
       delete paneRefCallbacks.current[`split-${tabId}`];
     },
-    [openView],
+    [openView, setActiveView],
   );
 
   const closeAllTerminals = useCallback(() => {
@@ -575,7 +388,12 @@ function App() {
     return () => clearTimeout(timer);
   }, [activeSplit, activeView]);
 
-  const darkMode = getTheme(generalSettings.theme ?? "light").isDark;
+  const activeThemeId = generalSettings.theme ?? "light";
+  const darkMode =
+    (
+      THEMES.find((t) => t.id === activeThemeId) ??
+      customThemes.find((t) => t.id === activeThemeId)
+    )?.isDark ?? getTheme(activeThemeId).isDark;
 
   const getStablePaneRef = useCallback((id: string) => {
     if (!paneRefCallbacks.current[id]) {
@@ -629,7 +447,7 @@ function App() {
       group: s.group || "",
       credentialId: s.credentialId || "",
     });
-    setEditSelectedColor(s.color || NEON_COLORS[0]);
+    setEditSelectedColor(s.color || NEON_COLORS[0]!);
     setEditingSession(s);
   }, []);
 
@@ -696,6 +514,9 @@ function App() {
             settingsTab={settingsTab}
             setSettingsTab={setSettingsTab}
             closeAllTerminals={closeAllTerminals}
+            customThemes={customThemes}
+            importTheme={importTheme}
+            removeTheme={removeTheme}
           />
         </div>
 
@@ -807,41 +628,54 @@ function App() {
                 ))}
               </div>
 
-              {activeTab && activeSplit && (
-                <div
-                  key={`split-${activeTab.tabId}`}
-                  style={{ overflow: "hidden", minHeight: 0, minWidth: 0 }}
-                  className="flex flex-col"
-                >
-                  <div
-                    style={{
-                      flex: "1 1 0",
-                      minHeight: 0,
-                      overflow: "hidden",
-                    }}
-                  >
-                    <TerminalPane
-                      pane={{
-                        ...activeTab,
-                        tabId: `split-${activeTab.tabId}`,
-                        sshSessionId: null,
-                        connected: false,
+              {/* Split panes — always mounted (like main panes) to prevent
+                  SSH reconnection when switching away and back to a split tab.
+                  Visibility is controlled via display:none, not unmounting. */}
+              <div
+                style={{
+                  display: activeSplit ? "flex" : "none",
+                  flexDirection: "column",
+                  overflow: "hidden",
+                  minHeight: 0,
+                  minWidth: 0,
+                }}
+              >
+                {tabs.map((tab) => {
+                  if (!splitTabs[tab.tabId]) return null;
+                  const isActiveTab = activeView === tab.tabId;
+                  return (
+                    <div
+                      key={`split-${tab.tabId}`}
+                      style={{
+                        display: isActiveTab ? "flex" : "none",
+                        flex: "1 1 0",
+                        minHeight: 0,
+                        overflow: "hidden",
                       }}
-                      password={tabPasswords[activeTab.tabId] ?? ""}
-                      onConnected={handleConnected}
-                      onDisconnected={handleDisconnected}
-                      visible={!!activeSplit}
-                      paneRef={getStablePaneRef(`split-${activeTab.tabId}`)}
-                      autoConnect
-                      fontSize={generalSettings.fontSize}
-                      fontFamily={generalSettings.fontFamily}
-                      disableAlternateScreen={
-                        generalSettings.disableAlternateScreen ?? false
-                      }
-                    />
-                  </div>
-                </div>
-              )}
+                    >
+                      <TerminalPane
+                        pane={{
+                          ...tab,
+                          tabId: `split-${tab.tabId}`,
+                          sshSessionId: null,
+                          connected: false,
+                        }}
+                        password={tabPasswords[tab.tabId] ?? ""}
+                        onConnected={handleConnected}
+                        onDisconnected={handleDisconnected}
+                        visible={isActiveTab}
+                        paneRef={getStablePaneRef(`split-${tab.tabId}`)}
+                        autoConnect
+                        fontSize={generalSettings.fontSize}
+                        fontFamily={generalSettings.fontFamily}
+                        disableAlternateScreen={
+                          generalSettings.disableAlternateScreen ?? false
+                        }
+                      />
+                    </div>
+                  );
+                })}
+              </div>
             </div>
 
             {/* Quick Commands bar */}
@@ -853,7 +687,7 @@ function App() {
                 <span className="text-[10px] text-hx-dim tracking-widest uppercase mr-1 shrink-0">
                   CMD
                 </span>
-                {scripts.map((sc) => (
+                {scripts.filter((sc) => !sc.group || sc.group === activeTab.sessionEntry.group).map((sc) => (
                   <button
                     key={sc.id}
                     onClick={() => {

@@ -18,6 +18,7 @@ export interface Script {
   id: string;
   name: string;
   content: string;
+  group?: string;
 }
 
 export interface GeneralSettings {

@@ -1,7 +1,7 @@
 import { getVersion as getAppVersion } from "@tauri-apps/api/app";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
-import { check as checkUpdate } from "@tauri-apps/plugin-updater";
+import { check as checkUpdate, type Update } from "@tauri-apps/plugin-updater";
 import {
     Download,
     Edit2,
@@ -16,8 +16,15 @@ import {
     Trash2,
     X,
 } from "lucide-react";
-import { memo, useCallback, useEffect, useState } from "react";
-import { THEMES } from "../themes";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { showToast } from "../lib/toast";
+import {
+    CUSTOM_THEME_ID_PREFIX,
+    serializeTheme,
+    THEMES,
+    toCustomThemeTemplate,
+    type ThemeDef,
+} from "../themes";
 import {
     adaptColor,
     COLOR_PAIRS,
@@ -73,6 +80,11 @@ interface SettingsProps {
   setImportStatus: (s: string | null) => void;
   darkMode: boolean;
   closeAllTerminals: () => void;
+  customThemes: ThemeDef[];
+  importTheme: (
+    raw: unknown,
+  ) => { ok: true; theme: ThemeDef } | { ok: false; error: string };
+  removeTheme: (id: string) => void;
   settingsTab:
     | "sessions"
     | "credentials"
@@ -122,6 +134,9 @@ export function Settings({
   settingsTab,
   setSettingsTab,
   closeAllTerminals,
+  customThemes,
+  importTheme,
+  removeTheme,
 }: SettingsProps) {
   // ── Settings-local state ──
   // settingsTab is now lifted to App.tsx so it persists when navigating away
@@ -153,8 +168,18 @@ export function Settings({
   const [tagForm, setTagForm] = useState({ name: "", color: NEON_COLORS[0] });
   const [editingTag, setEditingTag] = useState<Tag | null>(null);
   // Script form
-  const [scriptForm, setScriptForm] = useState({ name: "", content: "" });
+  const [scriptForm, setScriptForm] = useState({ name: "", content: "", group: "" });
   const [editingScript, setEditingScript] = useState<Script | null>(null);
+
+  // Dynamic app version
+  const [appVersion, setAppVersion] = useState("…");
+  useEffect(() => {
+    let mounted = true;
+    getAppVersion()
+      .then((v) => { if (mounted) setAppVersion(normalizeVersion(v)); })
+      .catch(() => {});
+    return () => { mounted = false; };
+  }, []);
 
   // ── Credential CRUD ──
   function addCredential() {
@@ -194,22 +219,26 @@ export function Settings({
     const t: Tag = {
       id: crypto.randomUUID(),
       name: tagForm.name,
-      color: tagForm.color,
+      color: tagForm.color ?? NEON_COLORS[0]!,
     };
     saveTags([t, ...tags]);
-    setTagForm({ name: "", color: NEON_COLORS[0] });
+    setTagForm({ name: "", color: NEON_COLORS[0]! });
   }
   function updateTag() {
     if (!editingTag) return;
     saveTags(
       tags.map((t) =>
         t.id === editingTag.id
-          ? { ...editingTag, name: tagForm.name, color: tagForm.color }
+          ? {
+              ...editingTag,
+              name: tagForm.name,
+              color: tagForm.color ?? NEON_COLORS[0]!,
+            }
           : t,
       ),
     );
     setEditingTag(null);
-    setTagForm({ name: "", color: NEON_COLORS[0] });
+    setTagForm({ name: "", color: NEON_COLORS[0]! });
   }
   function removeTag(id: string) {
     saveTags(tags.filter((t) => t.id !== id));
@@ -222,19 +251,20 @@ export function Settings({
       id: crypto.randomUUID(),
       name: scriptForm.name,
       content: scriptForm.content,
+      group: scriptForm.group || undefined,
     };
     saveScripts([s, ...scripts]);
-    setScriptForm({ name: "", content: "" });
+    setScriptForm({ name: "", content: "", group: "" });
   }
   function updateScript() {
     if (!editingScript) return;
     saveScripts(
       scripts.map((s) =>
-        s.id === editingScript.id ? { ...editingScript, ...scriptForm } : s,
+        s.id === editingScript.id ? { ...editingScript, ...scriptForm, group: scriptForm.group || undefined } : s,
       ),
     );
     setEditingScript(null);
-    setScriptForm({ name: "", content: "" });
+    setScriptForm({ name: "", content: "", group: "" });
   }
   function removeScript(id: string) {
     saveScripts(scripts.filter((s) => s.id !== id));
@@ -257,8 +287,10 @@ export function Settings({
     const a = document.createElement("a");
     a.href = url;
     a.download = `atlas-settings-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
     a.click();
-    URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
   }
 
   function importSettings(file: File) {
@@ -415,7 +447,7 @@ export function Settings({
                         group: s.group || "",
                         credentialId: s.credentialId || "",
                       });
-                      setEditSelectedColor(s.color || NEON_COLORS[0]);
+                      setEditSelectedColor(s.color || NEON_COLORS[0]!);
                       setEditingSession(s);
                     }}
                     onDoubleClick={() => openTab(s, true)}
@@ -738,6 +770,20 @@ export function Settings({
                 </div>
                 <div>
                   <label className="block text-[10px] font-mono uppercase tracking-widest text-hx-neon/50 mb-1">
+                    Folder / Group
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="production (optional)"
+                    value={scriptForm.group}
+                    onChange={(e) =>
+                      setScriptForm((f) => ({ ...f, group: e.target.value }))
+                    }
+                    className="hx-input w-full bg-hx-bg border border-hx-border px-3 py-1.5 text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-mono uppercase tracking-widest text-hx-neon/50 mb-1">
                     Commands
                   </label>
                   <textarea
@@ -757,7 +803,7 @@ export function Settings({
                     <button
                       onClick={() => {
                         setEditingScript(null);
-                        setScriptForm({ name: "", content: "" });
+                        setScriptForm({ name: "", content: "", group: "" });
                       }}
                       className="flex-1 py-1.5 text-[10px] uppercase tracking-widest text-hx-muted border border-hx-border hover:text-hx-text transition-colors hx-clip-btn"
                     >
@@ -789,14 +835,21 @@ export function Settings({
                     className="p-3 bg-hx-panel border border-hx-border"
                   >
                     <div className="flex items-center justify-between mb-2">
-                      <span className="text-xs font-mono font-bold text-hx-neon">
-                        {s.name}
-                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-mono font-bold text-hx-neon">
+                          {s.name}
+                        </span>
+                        {s.group && (
+                          <span className="text-[9px] font-mono text-hx-dim border border-hx-border px-1.5 py-0.5 uppercase tracking-widest">
+                            {s.group}
+                          </span>
+                        )}
+                      </div>
                       <div className="flex gap-1">
                         <button
                           onClick={() => {
                             setEditingScript(s);
-                            setScriptForm({ name: s.name, content: s.content });
+                            setScriptForm({ name: s.name, content: s.content, group: s.group || "" });
                           }}
                           className="p-1 text-hx-dim hover:text-hx-neon transition-colors"
                         >
@@ -927,7 +980,7 @@ export function Settings({
                     }}
                     className="text-hx-text leading-relaxed"
                   >
-                    <div>{`atlas-shell v${CURRENT_VERSION} — SSH Client`}</div>
+                    <div>{`atlas-shell v${appVersion} — SSH Client`}</div>
                     <div className="text-hx-neon">
                       root@server:~$ ls -la /var/log/
                     </div>
@@ -1172,46 +1225,173 @@ export function Settings({
                   Theme
                 </label>
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                  {THEMES.map((t) => {
+                  {[...THEMES, ...customThemes].map((t) => {
                     const isActive =
                       (generalSettings.theme ?? "light") === t.id;
+                    const isCustom = t.id.startsWith(CUSTOM_THEME_ID_PREFIX);
                     return (
-                      <button
-                        key={t.id}
-                        onClick={() =>
-                          saveGeneral({ ...generalSettings, theme: t.id })
-                        }
-                        className={`flex flex-col items-start gap-1 px-3 py-2.5 border transition-all text-left hx-clip-btn ${
-                          isActive
-                            ? "border-hx-neon/70 bg-hx-neon/10"
-                            : "border-hx-border hover:border-hx-neon/40 hover:bg-hx-neon/5"
-                        }`}
-                      >
-                        <div className="flex gap-1 mb-0.5">
-                          {[
-                            t.vars["--color-hx-bg"],
-                            t.vars["--color-hx-panel"],
-                            t.vars["--color-hx-neon"],
-                          ].map((c, i) => (
-                            <span
-                              key={i}
-                              className="w-3 h-3 rounded-sm border border-white/10"
-                              style={{ background: c }}
-                            />
-                          ))}
-                        </div>
-                        <span
-                          className={`text-[10px] font-bold uppercase tracking-widest ${isActive ? "text-hx-neon" : "text-hx-text"}`}
+                      <div key={t.id} className="relative group">
+                        <button
+                          onClick={() =>
+                            saveGeneral({ ...generalSettings, theme: t.id })
+                          }
+                          className={`flex flex-col items-start gap-1 px-3 py-2.5 border transition-all text-left hx-clip-btn w-full ${
+                            isActive
+                              ? "border-hx-neon/70 bg-hx-neon/10"
+                              : "border-hx-border hover:border-hx-neon/40 hover:bg-hx-neon/5"
+                          }`}
                         >
-                          {t.label}
-                        </span>
-                        <span className="text-[9px] text-hx-dim font-mono">
-                          {t.description}
-                        </span>
-                      </button>
+                          <div className="flex gap-1 mb-0.5">
+                            {[
+                              t.vars["--color-hx-bg"],
+                              t.vars["--color-hx-panel"],
+                              t.vars["--color-hx-neon"],
+                            ].map((c, i) => (
+                              <span
+                                key={i}
+                                className="w-3 h-3 rounded-sm border border-white/10"
+                                style={{ background: c }}
+                              />
+                            ))}
+                          </div>
+                          <span
+                            className={`text-[10px] font-bold uppercase tracking-widest ${isActive ? "text-hx-neon" : "text-hx-text"}`}
+                          >
+                            {t.label}
+                            {isCustom && (
+                              <span className="ml-1 text-hx-dim font-normal">
+                                ·custom
+                              </span>
+                            )}
+                          </span>
+                          <span className="text-[9px] text-hx-dim font-mono">
+                            {t.description}
+                          </span>
+                        </button>
+                        {isCustom && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if ((generalSettings.theme ?? "light") === t.id) {
+                                saveGeneral({
+                                  ...generalSettings,
+                                  theme: "light",
+                                });
+                              }
+                              removeTheme(t.id);
+                              showToast(`Removed theme "${t.label}"`, {
+                                variant: "info",
+                              });
+                            }}
+                            title="Remove custom theme"
+                            className="absolute top-1 right-1 p-0.5 text-hx-dim hover:text-hx-danger opacity-0 group-hover:opacity-100 transition-opacity"
+                          >
+                            <X size={10} />
+                          </button>
+                        )}
+                      </div>
                     );
                   })}
                 </div>
+
+                {/* Theme import / export */}
+                <div className="flex gap-2 pt-1">
+                  <label
+                    className="flex-1 py-1.5 text-[9px] font-bold uppercase tracking-widest hx-clip-btn flex items-center justify-center gap-1.5 cursor-pointer transition-all"
+                    style={{
+                      background: "linear-gradient(135deg,#BD00FF22,#BD00FF0a)",
+                      border: "1px solid #BD00FF55",
+                      color: "#BD00FF",
+                    }}
+                  >
+                    <FolderOpen size={10} />
+                    Import Theme
+                    <input
+                      type="file"
+                      accept="application/json,.json"
+                      className="hidden"
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0];
+                        e.target.value = "";
+                        if (!file) return;
+                        if (file.size > 64 * 1024) {
+                          showToast("Theme file too large", {
+                            variant: "error",
+                            detail: "Theme JSON must be < 64 KB.",
+                          });
+                          return;
+                        }
+                        try {
+                          const text = await file.text();
+                          const parsed = JSON.parse(text);
+                          const result = importTheme(parsed);
+                          if (result.ok) {
+                            saveGeneral({
+                              ...generalSettings,
+                              theme: result.theme.id,
+                            });
+                            showToast(
+                              `Imported theme "${result.theme.label}"`,
+                              { variant: "success" },
+                            );
+                          } else {
+                            showToast("Theme import failed", {
+                              variant: "error",
+                              detail: result.error,
+                            });
+                          }
+                        } catch (err) {
+                          showToast("Theme import failed", {
+                            variant: "error",
+                            detail:
+                              err instanceof Error
+                                ? err.message
+                                : "Invalid JSON.",
+                          });
+                        }
+                      }}
+                    />
+                  </label>
+                  <button
+                    onClick={() => {
+                      const activeId = generalSettings.theme ?? "light";
+                      const current =
+                        THEMES.find((t) => t.id === activeId) ??
+                        customThemes.find((t) => t.id === activeId) ??
+                        THEMES[0]!;
+                      const template = current.id.startsWith(
+                        CUSTOM_THEME_ID_PREFIX,
+                      )
+                        ? current
+                        : toCustomThemeTemplate(current);
+                      const json = serializeTheme(template);
+                      const blob = new Blob([json], {
+                        type: "application/json",
+                      });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement("a");
+                      a.href = url;
+                      a.download = `${template.id}.json`;
+                      document.body.appendChild(a);
+                      a.click();
+                      document.body.removeChild(a);
+                      URL.revokeObjectURL(url);
+                    }}
+                    className="flex-1 py-1.5 text-[9px] font-bold uppercase tracking-widest hx-clip-btn flex items-center justify-center gap-1.5 transition-all"
+                    style={{
+                      background: "linear-gradient(135deg,#00E5FF22,#00E5FF0a)",
+                      border: "1px solid #00E5FF55",
+                      color: "#00E5FF",
+                    }}
+                  >
+                    <Download size={10} />
+                    Export Theme
+                  </button>
+                </div>
+                <p className="text-[9px] text-hx-dim font-mono leading-relaxed">
+                  Theme JSON must use a <code>custom-*</code> id and include all
+                  <code> --color-hx-*</code> values. See README for the schema.
+                </p>
               </div>
               {/* Import / Export */}
               <div className="pt-3 border-t border-hx-border space-y-2">
@@ -1289,7 +1469,7 @@ export function Settings({
                   Atlas
                 </span>
                 <span className="text-xs text-hx-dim font-mono bg-hx-bg border border-hx-border px-2 py-0.5 rounded">
-                  {`v${CURRENT_VERSION}`}
+                  {`v${appVersion}`}
                 </span>
               </div>
               <p className="text-xs text-hx-muted font-mono leading-relaxed">
@@ -1377,7 +1557,6 @@ export function Settings({
 
 // ── Updates Tab ───────────────────────────────────────────────────────────────
 
-const CURRENT_VERSION = "0.2.3";
 const RELEASES_URL = "https://github.com/aleynatila/atlas-shell/releases";
 
 interface UpdateInfo {
@@ -1399,9 +1578,12 @@ function UpdatesTab({
   const [checking, setChecking] = useState(false);
   const [latestRelease, setLatestRelease] = useState<UpdateInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Cached Update object from checkForUpdates — reused for install so we
+  // don't call checkUpdate() twice (second call can fail on flaky networks).
+  const pendingUpdateRef = useRef<Update | null>(null);
   const [installing, setInstalling] = useState(false);
   const [installStatus, setInstallStatus] = useState<string | null>(null);
-  const [currentVersion, setCurrentVersion] = useState(CURRENT_VERSION);
+  const [currentVersion, setCurrentVersion] = useState("…");
   const [confirmInstall, setConfirmInstall] = useState(false);
   const [updateAvailable, setUpdateAvailable] = useState<boolean | null>(null);
   const [lastChecked, setLastChecked] = useState<string | null>(() => {
@@ -1448,9 +1630,15 @@ function UpdatesTab({
     setInstallStatus("Downloading signed update package...");
     setError(null);
     try {
-      const update = await checkUpdate();
+      // Reuse the Update object cached during checkForUpdates to avoid a
+      // second network round-trip that can fail independently and silently
+      // report "no update available" even though one was found moments ago.
+      let update = pendingUpdateRef.current;
       if (!update) {
-        setError("No update available.");
+        update = await checkUpdate();
+      }
+      if (!update) {
+        setError("No update available. Please check for updates first.");
         setInstalling(false);
         return;
       }
@@ -1495,6 +1683,8 @@ function UpdatesTab({
       // Use the Tauri updater plugin (routes through Rust, no CORS/WebView restrictions).
       // check() returns null when no update is available (current === latest).
       const update = await checkUpdate();
+      // Cache for downloadAndInstall so it doesn't need a second network call.
+      pendingUpdateRef.current = update ?? null;
       let info: UpdateInfo;
       let effectiveShouldUpdate: boolean;
 
@@ -2024,8 +2214,10 @@ export const EditSessionSidebar = memo(function EditSessionSidebar({
                   ...f,
                   credentialId: e.target.value,
                   user: cred ? cred.user : f.user,
-                  pass: cred ? cred.pass || "" : f.pass,
-                  keyPath: cred ? cred.keyPath || "" : f.keyPath,
+                  // Clear pass/keyPath when removing a credential so the old
+                  // credential password doesn't silently carry over into the session.
+                  pass: cred ? cred.pass || "" : "",
+                  keyPath: cred ? cred.keyPath || "" : "",
                 }));
               }}
               className="hx-input w-full bg-hx-bg border border-hx-border px-2 py-1.5 text-xs font-mono"

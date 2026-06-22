@@ -156,8 +156,164 @@ export const THEMES: ThemeDef[] = [
 ];
 
 export function getTheme(id: string): ThemeDef {
-  return THEMES.find((t) => t.id === id) ?? THEMES[0];
+  return THEMES.find((t) => t.id === id) ?? THEMES[0]!;
 }
+
+// ── Custom theme support ──────────────────────────────────────────────────────
+// Custom themes are user-imported ThemeDef objects persisted in localStorage.
+// They render via a runtime-injected <style> element rather than baked-in
+// `.theme-<id>` classes in index.css, so they can be added/removed without a
+// rebuild. Custom theme ids are prefixed with `custom-` to avoid collisions
+// with built-in ids; the validator enforces this.
+
+const CUSTOM_THEME_VAR_KEYS: (keyof ThemeDef["vars"])[] = [
+  "--color-hx-bg",
+  "--color-hx-panel",
+  "--color-hx-border",
+  "--color-hx-neon",
+  "--color-hx-neon-hover",
+  "--color-hx-purple",
+  "--color-hx-text",
+  "--color-hx-muted",
+  "--color-hx-dim",
+  "--color-hx-success",
+  "--color-hx-warning",
+  "--color-hx-danger",
+];
+
+const CUSTOM_THEME_ID_PREFIX = "custom-";
+const CUSTOM_THEME_STYLE_ID = "atlas-custom-themes";
+// Accepts #rgb / #rrggbb / #rrggbbaa, rgb()/rgba(), hsl()/hsla(), named transparent.
+// Permissive but blocks arbitrary attacker-controlled CSS via the value channel.
+const CSS_COLOR_RE =
+  /^(#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})|rgba?\([^()]{1,80}\)|hsla?\([^()]{1,80}\)|transparent)$/;
+// Custom-theme ids must be safe to use both as CSS class suffix and as a
+// JSON key. No whitespace, no special chars, no `<`/`>`/`"`/`'`/`\\`.
+const CUSTOM_THEME_ID_BODY_RE = /^[a-z0-9_-]{1,48}$/;
+
+/**
+ * Validate an arbitrary JSON payload and return a normalized ThemeDef, or
+ * `null` if the payload is malformed. Used by the theme import flow.
+ *
+ * Enforces:
+ *  - `id` is a string starting with `custom-` followed by 1–48 chars in
+ *    `[a-z0-9_-]` (so the value is safe in CSS class names + selectors).
+ *  - `label` / `description` are short strings (≤80 chars).
+ *  - `isDark` is a boolean.
+ *  - `vars` contains every required key, each a CSS color value matching
+ *    `CSS_COLOR_RE` (blocks CSS injection via the value channel).
+ */
+export function validateThemeJson(raw: unknown): ThemeDef | null {
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+  const id = typeof obj.id === "string" ? obj.id : "";
+  if (!id.startsWith(CUSTOM_THEME_ID_PREFIX)) return null;
+  const body = id.slice(CUSTOM_THEME_ID_PREFIX.length);
+  if (!CUSTOM_THEME_ID_BODY_RE.test(body)) return null;
+  const label =
+    typeof obj.label === "string" &&
+    obj.label.length > 0 &&
+    obj.label.length <= 80
+      ? obj.label
+      : null;
+  if (!label) return null;
+  const description =
+    typeof obj.description === "string" && obj.description.length <= 200
+      ? obj.description
+      : "";
+  const isDark = typeof obj.isDark === "boolean" ? obj.isDark : true;
+  const varsIn = obj.vars;
+  if (!varsIn || typeof varsIn !== "object") return null;
+  const varsObj = varsIn as Record<string, unknown>;
+  const vars: Partial<ThemeDef["vars"]> = {};
+  for (const key of CUSTOM_THEME_VAR_KEYS) {
+    const v = varsObj[key];
+    if (typeof v !== "string" || !CSS_COLOR_RE.test(v.trim())) return null;
+    vars[key] = v.trim();
+  }
+  return {
+    id,
+    label,
+    description,
+    isDark,
+    vars: vars as ThemeDef["vars"],
+  };
+}
+
+/**
+ * Escape a custom-theme id for safe inclusion in a CSS selector.
+ * Belt-and-braces — the validator already restricts the character set, but
+ * keep the escape so future relaxations of the validator don't open a hole.
+ */
+function escapeForCss(id: string): string {
+  return id.replace(/[^a-zA-Z0-9_-]/g, (ch) => `\\${ch}`);
+}
+
+/**
+ * Render a `<style>` block defining `.theme-<custom-id>` rules for every
+ * custom theme provided, replacing the previous block if one exists.
+ * Safe to call on every theme-list change.
+ */
+export function injectCustomThemeStyle(themes: ThemeDef[]): void {
+  if (typeof document === "undefined") return;
+  let style = document.getElementById(
+    CUSTOM_THEME_STYLE_ID,
+  ) as HTMLStyleElement | null;
+  if (!style) {
+    style = document.createElement("style");
+    style.id = CUSTOM_THEME_STYLE_ID;
+    document.head.appendChild(style);
+  }
+  const css = themes
+    .map((t) => {
+      const sel = `html.theme-${escapeForCss(t.id)}`;
+      const decls = CUSTOM_THEME_VAR_KEYS.map(
+        (k) => `  ${k}: ${t.vars[k]};`,
+      ).join("\n");
+      return `${sel} {\n${decls}\n}`;
+    })
+    .join("\n\n");
+  style.textContent = css;
+}
+
+/**
+ * Serialize a ThemeDef to a pretty-printed JSON string suitable for export.
+ * Only the fields needed to round-trip through `validateThemeJson` are emitted.
+ */
+export function serializeTheme(theme: ThemeDef): string {
+  const out = {
+    id: theme.id,
+    label: theme.label,
+    description: theme.description,
+    isDark: theme.isDark,
+    vars: CUSTOM_THEME_VAR_KEYS.reduce(
+      (acc, k) => {
+        acc[k] = theme.vars[k];
+        return acc;
+      },
+      {} as Record<string, string>,
+    ),
+  };
+  return JSON.stringify(out, null, 2);
+}
+
+/**
+ * Coerce a built-in theme into an exportable custom theme by re-prefixing
+ * its id. Used when exporting one of the built-in palettes as a starting
+ * point for a custom variant.
+ */
+export function toCustomThemeTemplate(base: ThemeDef): ThemeDef {
+  const baseId = base.id.startsWith(CUSTOM_THEME_ID_PREFIX)
+    ? base.id.slice(CUSTOM_THEME_ID_PREFIX.length)
+    : base.id;
+  return {
+    ...base,
+    id: `${CUSTOM_THEME_ID_PREFIX}${baseId}`,
+    label: `${base.label} (Custom)`,
+  };
+}
+
+export { CUSTOM_THEME_ID_PREFIX };
 
 /**
  * Terminal theme for xterm.js

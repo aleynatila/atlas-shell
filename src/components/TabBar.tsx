@@ -1,15 +1,15 @@
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import {
-  Columns2,
-  ExternalLink,
-  Minus,
-  Plus,
-  RefreshCw,
-  Rows2,
-  Server,
-  Settings,
-  Square,
-  X,
+    Columns2,
+    ExternalLink,
+    Minus,
+    Plus,
+    RefreshCw,
+    Rows2,
+    Server,
+    Settings,
+    Square,
+    X,
 } from "lucide-react";
 import { memo, useRef, useState } from "react";
 import { adaptColor, type TabPane } from "../types";
@@ -263,7 +263,7 @@ export const TabBar = memo(function TabBar({
                       const els =
                         document.querySelectorAll<HTMLElement>("[data-tab-id]");
                       let found: string | null = null;
-                      for (const el of els) {
+                      for (const el of Array.from(els)) {
                         const r = el.getBoundingClientRect();
                         if (me.clientX >= r.left && me.clientX <= r.right) {
                           found = el.getAttribute("data-tab-id");
@@ -285,6 +285,7 @@ export const TabBar = memo(function TabBar({
                           const toIdx = next.findIndex((t) => t.tabId === toId);
                           if (fromIdx < 0 || toIdx < 0) return prev;
                           const [moved] = next.splice(fromIdx, 1);
+                          if (!moved) return prev;
                           next.splice(toIdx, 0, moved);
                           return next;
                         });
@@ -580,7 +581,8 @@ export const TabBar = memo(function TabBar({
                 setTabs((prev) => prev.filter((t) => t.tabId === keepId));
                 setSplitTabs((prev) => {
                   const next: typeof prev = {};
-                  if (prev[keepId]) next[keepId] = prev[keepId];
+                  const orientation = prev[keepId];
+                  if (orientation) next[keepId] = orientation;
                   return next;
                 });
                 setActiveView(keepId);

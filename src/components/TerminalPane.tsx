@@ -10,6 +10,7 @@ import { Terminal } from "xterm";
 import { FitAddon } from "xterm-addon-fit";
 import { WebglAddon } from "xterm-addon-webgl";
 import "xterm/css/xterm.css";
+import { showToast } from "../lib/toast";
 import { TERMINAL_THEME } from "../themes";
 import type {
     DragDropPayload,
@@ -78,11 +79,12 @@ export const TerminalPane = memo(function TerminalPane({
   const [sftpTransfers, setSftpTransfers] = useState<TransferMap>({});
   const [currentCwd, setCurrentCwd] = useState("~");
   const currentCwdRef = useRef("~");
-  const pwdResponseRef = useRef<string>("");
-  const waitingForPwdRef = useRef(false);
   // Reconnect storm guard: track consecutive auto-reconnect attempts
   const reconnectCountRef = useRef(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Credentials entered via the in-terminal prompt — reused for auto-reconnect
+  // so sessions without saved passwords can reconnect after a disconnect.
+  const lastTypedCredsRef = useRef<{ user: string; pass: string } | null>(null);
   const MAX_AUTO_RECONNECTS = 3;
   const RECONNECT_DELAY_MS = 3000;
   const appVersionRef = useRef("…");
@@ -188,6 +190,7 @@ export const TerminalPane = memo(function TerminalPane({
     const combined = `${escapeSequenceRemainderRef.current}${chunk}`;
     let remainder = "";
 
+    // eslint-disable-next-line no-control-regex -- we intentionally match ESC (0x1b) for ANSI parsing
     const tailMatch = combined.match(/\x1b\[\??[0-9;]*$/);
     const complete = tailMatch ? combined.slice(0, tailMatch.index) : combined;
 
@@ -196,6 +199,7 @@ export const TerminalPane = memo(function TerminalPane({
     }
 
     const sanitized = complete.replace(
+      // eslint-disable-next-line no-control-regex -- ESC (0x1b) is required for ANSI sequence detection
       /\x1b\[\??([0-9;]*)([hl])/g,
       (sequence, params: string, modeChar: string) => {
         const values = (params || "")
@@ -208,9 +212,9 @@ export const TerminalPane = memo(function TerminalPane({
         );
         if (!isAltScreen) return sequence;
 
-        // On exit (l), replace with a full screen clear so nano's UI is
-        // wiped from the normal buffer before the shell prompt appears.
-        if (modeChar === "l") return "\x1b[2J\x1b[H";
+        // On exit (l), clear scrollback + screen so nano's UI is fully
+        // removed from the normal buffer before the shell prompt appears.
+        if (modeChar === "l") return "\x1b[3J\x1b[H";
 
         // On enter (h), just strip — we never switch buffers.
         return "";
@@ -258,20 +262,10 @@ export const TerminalPane = memo(function TerminalPane({
 
         setDragOver(false);
         if (Array.isArray(paths) && paths.length > 0) {
-          const sid = sshIdRef.current;
-          if (sid) {
-            waitingForPwdRef.current = true;
-            pwdResponseRef.current = "";
-            invokeSafe("send_ssh_input", { sessionId: sid, input: "pwd\n" });
-            setTimeout(() => {
-              setSftpRemoteDir(currentCwdRef.current || "~");
-              setSftpFiles(paths);
-              waitingForPwdRef.current = false;
-            }, 500);
-          } else {
-            setSftpRemoteDir("~");
-            setSftpFiles(paths);
-          }
+          // CWD is kept fresh by the OSC 7 handler on every shell prompt,
+          // so we can read it synchronously instead of round-tripping `pwd`.
+          setSftpRemoteDir(currentCwdRef.current || "~");
+          setSftpFiles(paths);
         }
       }),
       listenSafe("tauri://drag-over", (e) => {
@@ -313,11 +307,12 @@ export const TerminalPane = memo(function TerminalPane({
         // app.emit_all() broadcasts to all webviews; ignoring unknown IDs
         // prevents other panes' uploads from leaking into this pane's toast,
         // and also prevents re-adding entries the user already dismissed.
-        if (!(p.id in prev)) return prev;
+        const existing = prev[p.id];
+        if (!existing) return prev;
         return {
           ...prev,
           [p.id]: {
-            ...prev[p.id],
+            ...existing,
             progress:
               p.total > 0 ? Math.round((p.bytes_sent / p.total) * 100) : 0,
             done: p.done,
@@ -362,10 +357,14 @@ export const TerminalPane = memo(function TerminalPane({
         localPath: fp,
         remoteDir: sftpRemoteDir,
       }).catch((err) => {
-        setSftpTransfers((prev) => ({
-          ...prev,
-          [id]: { ...prev[id], done: true, error: String(err) },
-        }));
+        setSftpTransfers((prev) => {
+          const existing = prev[id];
+          if (!existing) return prev;
+          return {
+            ...prev,
+            [id]: { ...existing, done: true, error: String(err) },
+          };
+        });
       });
     });
     setSftpTransfers((prev) => ({ ...prev, ...transfers }));
@@ -384,6 +383,7 @@ export const TerminalPane = memo(function TerminalPane({
         fontFamily || "'Fira Code', 'Cascadia Code', Consolas, monospace",
       fontSize: fontSize || 15,
       lineHeight: 1.4,
+      scrollback: 5000,
     });
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
@@ -394,6 +394,28 @@ export const TerminalPane = memo(function TerminalPane({
       term.parser.registerCsiHandler({ prefix: "?", final: "l" }, (params) =>
         shouldBlockAlternateScreen(params, "exit"),
       ),
+      // OSC 7: shell reports current working directory after every prompt.
+      // Payload format: `file://<host>/<urlencoded-path>` (terminated by BEL or ST).
+      // We strip the scheme + host and URL-decode the path, then update CWD state.
+      // This replaces the previous fragile `cd`-sniffing + `pwd` round-trip.
+      term.parser.registerOscHandler(7, (data: string) => {
+        try {
+          let path = data;
+          if (path.startsWith("file://")) {
+            const slash = path.indexOf("/", 7);
+            path = slash >= 0 ? path.slice(slash) : "";
+          }
+          if (!path) return true;
+          const decoded = decodeURIComponent(path);
+          if (decoded && decoded !== currentCwdRef.current) {
+            currentCwdRef.current = decoded;
+            setCurrentCwd(decoded);
+          }
+        } catch {
+          /* malformed OSC 7 payload — ignore */
+        }
+        return true; // handled — do not pass through to renderer
+      }),
     ];
     const onBufferChange = term.buffer.onBufferChange(() => {
       debugLog(
@@ -411,6 +433,11 @@ export const TerminalPane = memo(function TerminalPane({
         );
         webglRef.current = null;
         webglLostRef.current = true;
+        showToast("Terminal GPU context lost", {
+          variant: "warning",
+          detail:
+            "Falling back to canvas renderer; will retry on next tab switch.",
+        });
       });
       term.loadAddon(webgl);
       webglRef.current = webgl;
@@ -420,6 +447,11 @@ export const TerminalPane = memo(function TerminalPane({
       // WebGL not available — canvas renderer is used automatically
       warnLog("WebGL unavailable, using canvas", e);
       webglRef.current = null;
+      showToast("WebGL renderer unavailable", {
+        variant: "info",
+        detail:
+          "Using canvas renderer. Performance may be reduced on large scrollback.",
+      });
     }
 
     setTimeout(() => {
@@ -552,6 +584,7 @@ export const TerminalPane = memo(function TerminalPane({
             const captUser = pr.user;
             const captPass = pr.pass;
             promptRef.current = null;
+            lastTypedCredsRef.current = { user: captUser, pass: captPass };
             connectCredsRef.current?.(captUser, captPass);
           }
         } else if (data === "\x7f" || data === "\b") {
@@ -828,6 +861,31 @@ export const TerminalPane = memo(function TerminalPane({
           setConnecting(false);
           reconnectCountRef.current = 0; // reset on successful connect
           onConnected(pane.tabId, sshId);
+          // Shell integration: register an OSC 7 emitter so the remote shell
+          // reports its CWD after every prompt. Bash uses PROMPT_COMMAND; zsh
+          // uses precmd_functions. Both branches are guarded so the line is a
+          // no-op on shells that don't recognise the variables (sh/dash just
+          // sets an unused variable). The trailing `\r` is harmless ENTER so
+          // the first prompt re-draws cleanly even if the line was absorbed
+          // before the shell finished printing it.
+          // NOTE: this single line will echo once at the top of the session.
+          // That is the same tradeoff VS Code / WezTerm shell integration make.
+          const oscInit =
+            ` __atlas_osc7(){ printf '\\033]7;file://%s\\033\\\\' \"$PWD\"; };` +
+            ` if [ -n \"$ZSH_VERSION\" ]; then typeset -ga precmd_functions;` +
+            ` precmd_functions=(__atlas_osc7 \${precmd_functions[@]});` +
+            ` else PROMPT_COMMAND=\"__atlas_osc7\${PROMPT_COMMAND:+;$PROMPT_COMMAND}\"; fi;` +
+            ` __atlas_osc7\n`;
+          // Delay slightly so the remote shell has printed its first prompt
+          // and is ready to read input — sending too early can race with motd.
+          setTimeout(() => {
+            if (sshIdRef.current === sshId) {
+              invokeSafe("send_ssh_input", {
+                sessionId: sshId,
+                input: oscInit,
+              }).catch(() => {});
+            }
+          }, 400);
           listenSafe(`ssh-output-${sshId}`, (event) => {
             // Discard events from a session that is no longer current.
             // This handles the race where auth fails before the listenSafe()
@@ -847,10 +905,12 @@ export const TerminalPane = memo(function TerminalPane({
               }
               term.write("\r\n\x1b[90m[disconnected]\x1b[0m\r\n");
               onDisconnected(pane.tabId);
+              const lc = lastTypedCredsRef.current;
               const hasCreds = !!(
                 pane.sessionEntry.pass ||
                 pane.sessionEntry.keyPath ||
-                password
+                password ||
+                lc?.pass
               );
               if (hasCreds && reconnectCountRef.current < MAX_AUTO_RECONNECTS) {
                 reconnectCountRef.current += 1;
@@ -861,7 +921,7 @@ export const TerminalPane = memo(function TerminalPane({
                   clearTimeout(reconnectTimerRef.current);
                 reconnectTimerRef.current = setTimeout(() => {
                   reconnectTimerRef.current = null;
-                  connectCredsRef.current?.();
+                  connectCredsRef.current?.(lc?.user, lc?.pass);
                 }, RECONNECT_DELAY_MS);
               } else if (
                 hasCreds &&
@@ -879,32 +939,12 @@ export const TerminalPane = memo(function TerminalPane({
               return;
             }
 
-            if (waitingForPwdRef.current) {
-              pwdResponseRef.current += payload.output;
-              const lines = pwdResponseRef.current.split(/[\r\n]+/);
-              for (const line of lines) {
-                const trimmed = line.trim();
-                if (
-                  (trimmed.startsWith("/") || trimmed.startsWith("~")) &&
-                  trimmed.length > 0 &&
-                  !trimmed.includes("$") &&
-                  !trimmed.includes("#") &&
-                  !trimmed.includes(">") &&
-                  !trimmed.includes("%") &&
-                  !trimmed.startsWith("pwd")
-                ) {
-                  currentCwdRef.current = trimmed;
-                  setCurrentCwd(trimmed);
-                  waitingForPwdRef.current = false;
-                  pwdResponseRef.current = "";
-                  break;
-                }
-              }
-            } else {
-              const output = stripAlternateScreenSequences(payload.output);
-              if (output) {
-                term.write(output);
-              }
+            // CWD updates are now handled by the OSC 7 parser registered on the
+            // terminal; the SSH output stream is written directly without any
+            // out-of-band pwd-sniffing.
+            const output = stripAlternateScreenSequences(payload.output);
+            if (output) {
+              term.write(output);
             }
           }).then((u) => {
             unlistenRef.current = u;
@@ -950,17 +990,21 @@ export const TerminalPane = memo(function TerminalPane({
           }
           sshIdRef.current = null;
         }
+        // Reset auto-reconnect budget so manual reconnect always gets 3 fresh attempts
+        reconnectCountRef.current = 0;
         setConnecting(false);
         onDisconnected(pane.tabId);
         promptRef.current = null;
         term.reset();
+        const lc = lastTypedCredsRef.current;
         const hasCreds = !!(
           pane.sessionEntry.pass ||
           pane.sessionEntry.keyPath ||
-          password
+          password ||
+          lc?.pass
         );
         if (hasCreds) {
-          connectCredsRef.current?.();
+          connectCredsRef.current?.(lc?.user, lc?.pass);
         } else {
           term.write("\r\nlogin as: ");
           promptRef.current = { stage: "user", user: "", pass: "" };

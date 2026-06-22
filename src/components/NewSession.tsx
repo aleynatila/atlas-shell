@@ -146,8 +146,8 @@ export const NewSession = memo(function NewSession({
                       ...f,
                       credentialId: e.target.value,
                       user: cred ? cred.user : f.user,
-                      pass: cred ? cred.pass || "" : f.pass,
-                      keyPath: cred ? cred.keyPath || "" : f.keyPath,
+                      pass: cred ? cred.pass || "" : "",
+                      keyPath: cred ? cred.keyPath || "" : "",
                     }));
                   }}
                   className="hx-input w-full bg-hx-bg border-2 border-hx-border hover:border-hx-neon/40 focus:border-hx-neon px-3 py-2.5 text-sm text-hx-text focus:outline-none transition-colors"

@@ -158,6 +158,11 @@ fn start_ssh_session(
                                     // Accumulates one batch of output; taken (not cloned) into each emit.
                                     let mut combined = String::new();
                                     let mut keepalive_timer = std::time::Instant::now();
+                                    // Adaptive idle counter: counts consecutive ticks without any
+                                    // I/O. Reset on output, input, or any work so an active session
+                                    // stays snappy; ramps up when truly idle so the loop sleeps in
+                                    // the kernel instead of busy-polling at 200 Hz.
+                                    let mut idle_ticks: u32 = 0;
                                     loop {
                                         // Coalesce up to 16 consecutive reads into one IPC event to halve
                                         // frontend message overhead vs the previous 8-read limit.
@@ -198,13 +203,16 @@ fn start_ssh_session(
                                         // eliminates redundant set_blocking syscalls and ensures
                                         // pasted text is flushed atomically rather than chunk-per-tick.
                                         let mut should_close = false;
+                                        let mut got_input = false;
                                         sess.set_blocking(true);
                                         loop {
                                             match rx.try_recv() {
                                                 Ok(InputMessage::Data(d)) => {
+                                                    got_input = true;
                                                     let _ = channel.write_all(&d);
                                                 }
                                                 Ok(InputMessage::Resize(c, r)) => {
+                                                    got_input = true;
                                                     let _ = channel.request_pty_size(c, r, None, None);
                                                 }
                                                 Ok(InputMessage::Close) | Err(mpsc::TryRecvError::Disconnected) => {
@@ -233,9 +241,23 @@ fn start_ssh_session(
                                         if channel.eof() {
                                             break;
                                         }
-                                        // Adaptive sleep: skip delay when data is flowing to reduce latency
-                                        if !got_data {
-                                            thread::sleep(Duration::from_millis(5));
+                                        // Adaptive idle sleep — replaces fixed 5ms busy-poll.
+                                        // Active or recently-active session stays at low latency;
+                                        // truly idle session sleeps in the kernel for longer
+                                        // intervals so per-session idle CPU drops well under 0.2%.
+                                        if got_data || got_input {
+                                            idle_ticks = 0;
+                                            // No sleep — burst-process while data is flowing.
+                                        } else {
+                                            idle_ticks = idle_ticks.saturating_add(1);
+                                            let sleep_ms = if idle_ticks < 20 {
+                                                5    // <100ms idle: snappy
+                                            } else if idle_ticks < 200 {
+                                                20   // <1s idle: moderate
+                                            } else {
+                                                100  // long idle: kernel-sleep mostly
+                                            };
+                                            thread::sleep(Duration::from_millis(sleep_ms));
                                         }
                                     }
                                 }
@@ -468,6 +490,10 @@ fn do_scp_upload(
         }
     }
 
+    // Flush any internally buffered write data before declaring EOF.
+    // Without this, libssh2 may leave data in its send buffer and the server
+    // receives a truncated file — manifests as corrupted archives/indexes.
+    channel.flush().map_err(|e| e.to_string())?;
     // Proper close sequence — libssh2 sends EOF + waits for server confirmation.
     channel.send_eof().map_err(|e| e.to_string())?;
     channel.wait_eof().map_err(|e| e.to_string())?;
