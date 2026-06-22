@@ -39,3 +39,8 @@ gh release delete v0.4.7 --yes
 git tag -d v0.4.7
 git push origin :refs/tags/v0.4.7
 ```
+
+Bundan sonraki workflow run'larında da kod değişikliği yapmadan önce:
+
+- npm run build → frontend hataları (7-8 sn)
+- cd src-tauri && cargo check → Rust hataları (~1 dk, sonraki çalıştırmalarda daha hızlı)
