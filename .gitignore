@@ -35,6 +35,10 @@ src-tauri/bin/*.dll
 # Logs
 *.log
 
+# Local notes / scratchpads
+ENHANCEMENTS.md
+problems.md
+
 # Personal / local data files — not for end users
 data/SolarPutty_sessions_decrypted.txt
 data/seed_localstorage.js
