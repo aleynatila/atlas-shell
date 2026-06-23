@@ -132,30 +132,29 @@ export function useSessionVault() {
 
   const saveSessions = useCallback((list: SessionEntry[]) => {
     setSessions(list);
-    if (saveSessionsTimerRef.current)
+    // Cancel any pending debounced save before writing immediately
+    if (saveSessionsTimerRef.current) {
       clearTimeout(saveSessionsTimerRef.current);
-    saveSessionsTimerRef.current = setTimeout(() => {
-      const noPass = list.map(({ pass: _p, ...rest }) => rest);
-      const json = JSON.stringify(noPass);
-      try {
-        localStorage.setItem("atlas_sessions", json);
-      } catch {}
-      invoke("write_store", { key: "atlas_sessions", value: json }).catch(
-        () => {},
-      );
-      list.forEach((s) => {
-        if (!s.credentialId) {
-          if (s.pass) {
-            invoke("set_credential", {
-              id: "sess_" + s.id,
-              password: s.pass,
-            }).catch(() => {});
-          } else {
-            invoke("delete_credential", { id: "sess_" + s.id }).catch(() => {});
-          }
+      saveSessionsTimerRef.current = null;
+    }
+    const noPass = list.map(({ pass: _p, ...rest }) => rest);
+    const json = JSON.stringify(noPass);
+    try {
+      localStorage.setItem("atlas_sessions", json);
+    } catch {}
+    invoke("write_store", { key: "atlas_sessions", value: json }).catch(() => {});
+    list.forEach((s) => {
+      if (!s.credentialId) {
+        if (s.pass) {
+          invoke("set_credential", {
+            id: "sess_" + s.id,
+            password: s.pass,
+          }).catch(() => {});
+        } else {
+          invoke("delete_credential", { id: "sess_" + s.id }).catch(() => {});
         }
-      });
-    }, 400);
+      }
+    });
   }, []);
 
   const saveCredentials = useCallback((list: Credential[]) => {

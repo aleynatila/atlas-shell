@@ -639,6 +639,35 @@ fn debug_log(message: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn export_to_file(content: String, default_name: String) -> Result<Option<String>, String> {
+    let path = rfd::FileDialog::new()
+        .set_file_name(&default_name)
+        .add_filter("JSON", &["json"])
+        .save_file();
+    match path {
+        Some(p) => {
+            std::fs::write(&p, content).map_err(|e| e.to_string())?;
+            Ok(Some(p.to_string_lossy().to_string()))
+        }
+        None => Ok(None),
+    }
+}
+
+#[tauri::command]
+fn import_from_file() -> Result<Option<String>, String> {
+    let path = rfd::FileDialog::new()
+        .add_filter("JSON", &["json"])
+        .pick_file();
+    match path {
+        Some(p) => {
+            let content = std::fs::read_to_string(&p).map_err(|e| e.to_string())?;
+            Ok(Some(content))
+        }
+        None => Ok(None),
+    }
+}
+
 fn main() {
     tauri::Builder::default()
     .plugin(tauri_plugin_shell::init())
@@ -658,6 +687,8 @@ fn main() {
         read_store,
         write_store,
         debug_log,
+        export_to_file,
+        import_from_file,
     ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

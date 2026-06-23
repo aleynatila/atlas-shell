@@ -1,4 +1,5 @@
 import { getVersion as getAppVersion } from "@tauri-apps/api/app";
+import { invoke } from "@tauri-apps/api/core";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import { check as checkUpdate, type Update } from "@tauri-apps/plugin-updater";
@@ -290,7 +291,7 @@ export function Settings({
   }
 
   // ── Import / Export ──
-  function exportSettings() {
+  async function exportSettings() {
     const data = {
       sessions,
       credentials,
@@ -299,37 +300,39 @@ export function Settings({
       generalSettings,
       exportedAt: new Date().toISOString(),
     };
-    const blob = new Blob([JSON.stringify(data, null, 2)], {
-      type: "application/json",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `atlas-settings-${new Date().toISOString().slice(0, 10)}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    const json = JSON.stringify(data, null, 2);
+    const defaultName = `atlas-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    try {
+      const saved = await invoke<string | null>("export_to_file", {
+        content: json,
+        defaultName,
+      });
+      if (saved) {
+        setImportStatus(`✓ Exported to ${saved}`);
+        setTimeout(() => setImportStatus(null), 5000);
+      }
+    } catch (e) {
+      setImportStatus(`✗ Export failed: ${e}`);
+      setTimeout(() => setImportStatus(null), 4000);
+    }
   }
 
-  function importSettings(file: File) {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      try {
-        const data = JSON.parse(e.target?.result as string);
-        if (Array.isArray(data.sessions)) saveSessions(data.sessions);
-        if (Array.isArray(data.credentials)) saveCredentials(data.credentials);
-        if (Array.isArray(data.tags)) saveTags(data.tags);
-        if (Array.isArray(data.scripts)) saveScripts(data.scripts);
-        if (data.generalSettings) saveGeneral(data.generalSettings);
-        setImportStatus("✓ Settings imported successfully");
-        setTimeout(() => setImportStatus(null), 4000);
-      } catch {
-        setImportStatus("✗ Import failed — invalid file");
-        setTimeout(() => setImportStatus(null), 4000);
-      }
-    };
-    reader.readAsText(file);
+  async function importSettings() {
+    try {
+      const content = await invoke<string | null>("import_from_file");
+      if (!content) return;
+      const data = JSON.parse(content);
+      if (Array.isArray(data.sessions)) saveSessions(data.sessions);
+      if (Array.isArray(data.credentials)) saveCredentials(data.credentials);
+      if (Array.isArray(data.tags)) saveTags(data.tags);
+      if (Array.isArray(data.scripts)) saveScripts(data.scripts);
+      if (data.generalSettings) saveGeneral(data.generalSettings);
+      setImportStatus(`✓ Imported ${Array.isArray(data.sessions) ? data.sessions.length : 0} sessions`);
+      setTimeout(() => setImportStatus(null), 4000);
+    } catch {
+      setImportStatus("✗ Import failed — invalid file");
+      setTimeout(() => setImportStatus(null), 4000);
+    }
   }
 
   return (
@@ -1675,7 +1678,8 @@ export function Settings({
                     <Download size={10} />
                     Export
                   </button>
-                  <label
+                  <button
+                    onClick={() => importSettings()}
                     className="flex-1 py-2 text-[10px] font-bold uppercase tracking-widest hx-clip-btn flex items-center justify-center gap-1.5 transition-all cursor-pointer"
                     style={{
                       background: "linear-gradient(135deg,#BD00FF22,#BD00FF0a)",
@@ -1685,17 +1689,7 @@ export function Settings({
                   >
                     <FolderOpen size={10} />
                     Import
-                    <input
-                      type="file"
-                      accept=".json"
-                      className="hidden"
-                      onChange={(e) => {
-                        const file = e.target.files?.[0];
-                        if (file) importSettings(file);
-                        e.target.value = "";
-                      }}
-                    />
-                  </label>
+                  </button>
                 </div>
                 {importStatus && (
                   <p
