@@ -29,7 +29,7 @@ function ProtocolBadge({ protocol }: { protocol: string }) {
   );
 }
 
-export const SftpToast = memo(function SftpToast({
+export const SCPToast = memo(function SCPToast({
   transfers,
   activeTransfers,
   doneTransfers,

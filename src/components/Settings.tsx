@@ -3,6 +3,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import { check as checkUpdate, type Update } from "@tauri-apps/plugin-updater";
 import {
+    ChevronRight,
     Download,
     Edit2,
     ExternalLink,
@@ -168,17 +169,29 @@ export function Settings({
   const [tagForm, setTagForm] = useState({ name: "", color: NEON_COLORS[0] });
   const [editingTag, setEditingTag] = useState<Tag | null>(null);
   // Script form
-  const [scriptForm, setScriptForm] = useState({ name: "", content: "", group: "" });
+  const [scriptForm, setScriptForm] = useState({
+    name: "",
+    content: "",
+    group: "",
+  });
   const [editingScript, setEditingScript] = useState<Script | null>(null);
+  const [scriptSearch, setScriptSearch] = useState("");
+  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(
+    () => new Set(),
+  );
 
   // Dynamic app version
   const [appVersion, setAppVersion] = useState("…");
   useEffect(() => {
     let mounted = true;
     getAppVersion()
-      .then((v) => { if (mounted) setAppVersion(normalizeVersion(v)); })
+      .then((v) => {
+        if (mounted) setAppVersion(normalizeVersion(v));
+      })
       .catch(() => {});
-    return () => { mounted = false; };
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   // ── Credential CRUD ──
@@ -260,7 +273,13 @@ export function Settings({
     if (!editingScript) return;
     saveScripts(
       scripts.map((s) =>
-        s.id === editingScript.id ? { ...editingScript, ...scriptForm, group: scriptForm.group || undefined } : s,
+        s.id === editingScript.id
+          ? {
+              ...editingScript,
+              ...scriptForm,
+              group: scriptForm.group || undefined,
+            }
+          : s,
       ),
     );
     setEditingScript(null);
@@ -744,134 +763,376 @@ export function Settings({
         )}
 
         {/* ── Scripts tab ── */}
-        {settingsTab === "scripts" && (
-          <div>
-            <h2 className="text-xs font-black uppercase tracking-[0.2em] text-hx-neon mb-4">
-              Scripts
-            </h2>
-            <div className="space-y-4">
-              <div className="bg-hx-panel border border-hx-border p-4 space-y-3">
-                <p className="text-[10px] font-mono uppercase tracking-widest text-hx-neon/60">
-                  {editingScript ? "Edit Script" : "New Script"}
-                </p>
-                <div>
-                  <label className="block text-[10px] font-mono uppercase tracking-widest text-hx-neon/50 mb-1">
-                    Name
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="update-system"
-                    value={scriptForm.name}
-                    onChange={(e) =>
-                      setScriptForm((f) => ({ ...f, name: e.target.value }))
-                    }
-                    className="hx-input w-full bg-hx-bg border border-hx-border px-3 py-1.5 text-xs"
-                  />
+        {settingsTab === "scripts" &&
+          (() => {
+            const allGroups = [
+              ...new Set(
+                scripts.filter((s) => s.group).map((s) => s.group as string),
+              ),
+            ].sort();
+            const q = scriptSearch.trim().toLowerCase();
+            const ungrouped = scripts.filter((s) => !s.group);
+
+            const isOpen = (key: string) => !collapsedFolders.has(key);
+            const toggleFolder = (key: string) => {
+              setCollapsedFolders((prev) => {
+                const next = new Set(prev);
+                if (next.has(key)) next.delete(key);
+                else next.add(key);
+                return next;
+              });
+            };
+
+            const selectScript = (s: Script) => {
+              setEditingScript(s);
+              setScriptForm({
+                name: s.name,
+                content: s.content,
+                group: s.group || "",
+              });
+            };
+            const clearScript = () => {
+              setEditingScript(null);
+              setScriptForm({ name: "", content: "", group: "" });
+            };
+
+            const ScriptRow = memo(({ s }: { s: Script }) => (
+              <div
+                className={`group flex items-center gap-2 px-3 py-2 border-b border-hx-border/30 transition-colors cursor-pointer ${
+                  editingScript?.id === s.id
+                    ? "bg-hx-neon/8 border-l-2 border-l-hx-neon"
+                    : "hover:bg-hx-neon/5"
+                }`}
+                onClick={() => selectScript(s)}
+              >
+                <span className="text-[10px] text-hx-dim/50 font-mono shrink-0">
+                  ›
+                </span>
+                <div className="flex-1 min-w-0">
+                  <span className="text-[11px] font-mono text-hx-text truncate block">
+                    {s.name}
+                  </span>
+                  <span className="text-[10px] text-hx-dim font-mono truncate block">
+                    {s.content.split("\n")[0]}
+                  </span>
                 </div>
-                <div>
-                  <label className="block text-[10px] font-mono uppercase tracking-widest text-hx-neon/50 mb-1">
-                    Folder / Group
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="production (optional)"
-                    value={scriptForm.group}
-                    onChange={(e) =>
-                      setScriptForm((f) => ({ ...f, group: e.target.value }))
-                    }
-                    className="hx-input w-full bg-hx-bg border border-hx-border px-3 py-1.5 text-xs"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[10px] font-mono uppercase tracking-widest text-hx-neon/50 mb-1">
-                    Commands
-                  </label>
-                  <textarea
-                    placeholder={
-                      "apt update && apt upgrade -y\nsystemctl restart nginx"
-                    }
-                    value={scriptForm.content}
-                    onChange={(e) =>
-                      setScriptForm((f) => ({ ...f, content: e.target.value }))
-                    }
-                    rows={5}
-                    className="hx-input w-full bg-hx-bg border border-hx-border px-3 py-2 text-xs font-mono resize-y"
-                  />
-                </div>
-                <div className="flex gap-2">
-                  {editingScript && (
-                    <button
-                      onClick={() => {
-                        setEditingScript(null);
-                        setScriptForm({ name: "", content: "", group: "" });
-                      }}
-                      className="flex-1 py-1.5 text-[10px] uppercase tracking-widest text-hx-muted border border-hx-border hover:text-hx-text transition-colors hx-clip-btn"
-                    >
-                      Cancel
-                    </button>
-                  )}
+                <div className="flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
                   <button
-                    onClick={editingScript ? updateScript : addScript}
-                    className="flex-1 py-1.5 text-[10px] font-bold uppercase tracking-widest hx-clip-btn transition-all"
-                    style={{
-                      background: "linear-gradient(135deg,#00E5FF22,#00E5FF0a)",
-                      border: "1px solid #00E5FF55",
-                      color: "#00E5FF",
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      selectScript(s);
                     }}
+                    className="p-1 text-hx-dim hover:text-hx-neon transition-colors"
+                    title="Edit"
                   >
-                    {editingScript ? "◆ Update" : "◆ Add"}
+                    <Edit2 size={11} />
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      removeScript(s.id);
+                      if (editingScript?.id === s.id) clearScript();
+                    }}
+                    className="p-1 text-hx-dim hover:text-hx-danger transition-colors"
+                    title="Delete"
+                  >
+                    <Trash2 size={11} />
                   </button>
                 </div>
               </div>
-              <div className="space-y-2">
-                {scripts.length === 0 && (
-                  <p className="text-hx-dim text-xs font-mono">
-                    No scripts saved.
-                  </p>
-                )}
-                {scripts.map((s) => (
-                  <div
-                    key={s.id}
-                    className="p-3 bg-hx-panel border border-hx-border"
+            ));
+
+            const FolderSection = ({
+              folderKey,
+              label,
+              folderScripts,
+            }: {
+              folderKey: string;
+              label: string;
+              folderScripts: Script[];
+            }) => {
+              const open = isOpen(folderKey);
+              return (
+                <div>
+                  <button
+                    onClick={() => toggleFolder(folderKey)}
+                    className="w-full flex items-center gap-2 px-3 py-2 hover:bg-hx-neon/5 transition-colors border-b border-hx-border/30"
                   >
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs font-mono font-bold text-hx-neon">
-                          {s.name}
-                        </span>
-                        {s.group && (
-                          <span className="text-[9px] font-mono text-hx-dim border border-hx-border px-1.5 py-0.5 uppercase tracking-widest">
-                            {s.group}
-                          </span>
-                        )}
-                      </div>
-                      <div className="flex gap-1">
-                        <button
-                          onClick={() => {
-                            setEditingScript(s);
-                            setScriptForm({ name: s.name, content: s.content, group: s.group || "" });
-                          }}
-                          className="p-1 text-hx-dim hover:text-hx-neon transition-colors"
-                        >
-                          <Edit2 size={11} />
-                        </button>
-                        <button
-                          onClick={() => removeScript(s.id)}
-                          className="p-1 text-hx-dim hover:text-hx-danger transition-colors"
-                        >
-                          <Trash2 size={11} />
-                        </button>
-                      </div>
+                    <ChevronRight
+                      size={10}
+                      className={`text-hx-dim transition-transform duration-150 shrink-0 ${open ? "rotate-90" : ""}`}
+                    />
+                    <FolderOpen
+                      size={12}
+                      className={`shrink-0 transition-colors ${open ? "text-hx-neon/70" : "text-hx-muted"}`}
+                    />
+                    <span
+                      className={`text-[11px] font-mono flex-1 text-left truncate ${open ? "text-hx-text" : "text-hx-muted"}`}
+                    >
+                      {label}
+                    </span>
+                    <span className="text-[10px] font-mono text-hx-dim/60 shrink-0 bg-hx-bg px-1.5 py-0.5 rounded">
+                      {folderScripts.length}
+                    </span>
+                  </button>
+                  {open && (
+                    <div className="border-l border-hx-neon/10 ml-5">
+                      {folderScripts.map((s) => (
+                        <ScriptRow key={s.id} s={s} />
+                      ))}
                     </div>
-                    <pre className="text-[10px] text-hx-muted font-mono whitespace-pre-wrap line-clamp-3">
-                      {s.content}
-                    </pre>
+                  )}
+                </div>
+              );
+            };
+
+            // Flat search results
+            const searchResults = q
+              ? scripts.filter(
+                  (s) =>
+                    s.name.toLowerCase().includes(q) ||
+                    s.content.toLowerCase().includes(q) ||
+                    (s.group ?? "").toLowerCase().includes(q),
+                )
+              : null;
+
+            return (
+              <div
+                className="flex gap-5 min-h-0"
+                style={{ height: "calc(100vh - 180px)" }}
+              >
+                {/* ── Left column: folder tree ── */}
+                <div
+                  className="flex flex-col gap-3 min-h-0"
+                  style={{ width: "38%" }}
+                >
+                  {/* Header */}
+                  <div className="flex items-center justify-between flex-none">
+                    <h2 className="text-xs font-black uppercase tracking-[0.2em] text-hx-neon">
+                      Scripts
+                    </h2>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-hx-dim font-mono">
+                        {scripts.length} total
+                      </span>
+                      <button
+                        onClick={clearScript}
+                        className="flex items-center gap-1 px-2 py-0.5 text-[10px] font-mono text-hx-neon/70 border border-hx-neon/20 hover:bg-hx-neon/10 hover:text-hx-neon transition-colors"
+                        title="New script"
+                      >
+                        <Plus size={10} />
+                        New
+                      </button>
+                    </div>
                   </div>
-                ))}
+
+                  {/* Search */}
+                  <div className="relative flex-none">
+                    <input
+                      type="text"
+                      placeholder="Search scripts..."
+                      value={scriptSearch}
+                      onChange={(e) => setScriptSearch(e.target.value)}
+                      className="hx-input w-full bg-hx-bg border border-hx-border px-3 py-1.5 text-xs font-mono"
+                    />
+                    {scriptSearch && (
+                      <button
+                        onClick={() => setScriptSearch("")}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-hx-dim hover:text-hx-text"
+                      >
+                        <X size={12} />
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Tree */}
+                  <div
+                    className="flex-1 min-h-0 overflow-y-auto border border-hx-border bg-hx-bg"
+                    style={{
+                      scrollbarWidth: "thin",
+                      scrollbarColor: "var(--color-hx-border) transparent",
+                    }}
+                  >
+                    {/* Empty state */}
+                    {scripts.length === 0 && (
+                      <div className="flex flex-col items-center justify-center h-40 gap-3 text-center px-4">
+                        <Play size={22} className="text-hx-border" />
+                        <div>
+                          <p className="text-xs text-hx-muted font-mono">
+                            No scripts yet
+                          </p>
+                          <p className="text-[10px] text-hx-dim font-mono mt-1">
+                            Fill the form → click Add Script
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Search: flat results */}
+                    {searchResults &&
+                      (searchResults.length === 0 ? (
+                        <p className="text-[10px] text-hx-dim font-mono px-3 py-4 text-center">
+                          No matching scripts
+                        </p>
+                      ) : (
+                        <div>
+                          {searchResults.map((s) => (
+                            <ScriptRow key={s.id} s={s} />
+                          ))}
+                        </div>
+                      ))}
+
+                    {/* Normal: accordion folder tree */}
+                    {!searchResults && scripts.length > 0 && (
+                      <div>
+                        {ungrouped.length > 0 && (
+                          <FolderSection
+                            folderKey="__general__"
+                            label="General"
+                            folderScripts={ungrouped}
+                          />
+                        )}
+                        {allGroups.map((group) => (
+                          <FolderSection
+                            key={group}
+                            folderKey={group}
+                            label={group}
+                            folderScripts={scripts.filter(
+                              (s) => s.group === group,
+                            )}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* ── Right column: form ── */}
+                <div className="flex-1 min-h-0">
+                  <div className="bg-hx-panel border border-hx-border p-5 flex flex-col gap-4 h-full">
+                    {/* Form header */}
+                    <div className="flex items-center justify-between flex-none">
+                      <p className="text-xs font-bold uppercase tracking-[0.15em] text-hx-neon">
+                        {editingScript ? "Edit Script" : "New Script"}
+                      </p>
+                      {editingScript && (
+                        <button
+                          onClick={clearScript}
+                          className="text-hx-dim hover:text-hx-text transition-colors"
+                          title="Cancel edit"
+                        >
+                          <X size={14} />
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Name */}
+                    <div className="flex-none">
+                      <label className="block text-[11px] font-mono text-hx-muted mb-1.5">
+                        Name
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="update-system"
+                        value={scriptForm.name}
+                        onChange={(e) =>
+                          setScriptForm((f) => ({ ...f, name: e.target.value }))
+                        }
+                        className="hx-input w-full bg-hx-bg border border-hx-border px-3 py-2 text-xs"
+                      />
+                    </div>
+
+                    {/* Folder / Group */}
+                    <div className="flex-none">
+                      <label className="block text-[11px] font-mono text-hx-muted mb-1.5">
+                        Folder / Group{" "}
+                        <span className="text-hx-dim">(optional)</span>
+                      </label>
+                      <input
+                        type="text"
+                        list="script-groups"
+                        placeholder="production"
+                        value={scriptForm.group}
+                        onChange={(e) =>
+                          setScriptForm((f) => ({
+                            ...f,
+                            group: e.target.value,
+                          }))
+                        }
+                        className="hx-input w-full bg-hx-bg border border-hx-border px-3 py-2 text-xs"
+                      />
+                      <datalist id="script-groups">
+                        {allGroups.map((g) => (
+                          <option key={g} value={g} />
+                        ))}
+                      </datalist>
+                      {allGroups.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-2">
+                          {allGroups.map((g) => (
+                            <button
+                              key={g}
+                              type="button"
+                              onClick={() =>
+                                setScriptForm((f) => ({
+                                  ...f,
+                                  group: f.group === g ? "" : g,
+                                }))
+                              }
+                              className={`px-2 py-0.5 text-[10px] font-mono border transition-colors ${
+                                scriptForm.group === g
+                                  ? "bg-hx-neon/15 text-hx-neon border-hx-neon/30"
+                                  : "bg-hx-bg text-hx-dim border-hx-border hover:text-hx-text hover:border-hx-border/80"
+                              }`}
+                            >
+                              {g}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Commands */}
+                    <div className="flex-1 flex flex-col min-h-0">
+                      <label className="block text-[11px] font-mono text-hx-muted mb-1.5 flex-none">
+                        Commands
+                      </label>
+                      <textarea
+                        placeholder={
+                          "apt update && apt upgrade -y\nsystemctl restart nginx"
+                        }
+                        value={scriptForm.content}
+                        onChange={(e) =>
+                          setScriptForm((f) => ({
+                            ...f,
+                            content: e.target.value,
+                          }))
+                        }
+                        className="hx-input flex-1 min-h-0 w-full bg-hx-bg border border-hx-border px-3 py-2 text-xs font-mono resize-none"
+                      />
+                    </div>
+
+                    {/* Action button */}
+                    <div className="flex-none flex justify-end">
+                      <button
+                        onClick={editingScript ? updateScript : addScript}
+                        disabled={!scriptForm.name || !scriptForm.content}
+                        className="hx-clip-btn px-6 py-2 text-[11px] font-bold uppercase tracking-widest transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                        style={{
+                          background:
+                            "linear-gradient(135deg,#00E5FF33,#00E5FF15)",
+                          border: "1px solid #00E5FF66",
+                          color: "#00E5FF",
+                          boxShadow: "0 0 12px rgba(0,229,255,0.1)",
+                        }}
+                      >
+                        {editingScript ? "◆ Update" : "◆ Add Script"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
               </div>
-            </div>
-          </div>
-        )}
+            );
+          })()}
 
         {/* ── Appearance tab ── */}
         {settingsTab === "appearance" && (
@@ -1189,12 +1450,15 @@ export function Settings({
                 <div className="flex items-center justify-between gap-4">
                   <div>
                     <label className="block text-[10px] font-mono uppercase tracking-widest text-hx-neon/60">
-                      Keep Scrollback In Nano/Vim
+                      PuTTY Mode (Nano/Vim Scrollback)
                     </label>
                     <p className="text-[10px] text-hx-dim font-mono mt-1 leading-relaxed">
-                      Disables the alternate screen for full-screen terminal
-                      apps so mouse wheel can scroll terminal history while the
-                      app stays open, similar to PuTTY.
+                      Nano/vim çıkınca önceki terminal satırları silinsin mi?
+                      <span className="text-hx-muted">
+                        {" "}
+                        Kapalı = standart davranış (önerilen). Açık = PuTTY gibi
+                        nano içeriği scrollback'te kalır ama ekran sıfırlanır.
+                      </span>
                     </p>
                   </div>
                   <button
@@ -1474,7 +1738,7 @@ export function Settings({
               </div>
               <p className="text-xs text-hx-muted font-mono leading-relaxed">
                 A modern SSH client built with Tauri, React, and Rust. Supports
-                multi-tab sessions, split terminal views, SFTP uploads, quick
+                multi-tab sessions, split terminal views, SCP uploads, quick
                 commands, and Solar PuTTY import.
               </p>
               <div className="border-t border-hx-border pt-4 space-y-2 text-[10px] font-mono">

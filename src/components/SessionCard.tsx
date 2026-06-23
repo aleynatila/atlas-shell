@@ -70,9 +70,13 @@ export const SessionCard = memo(
         className="hx-card group cursor-pointer"
       >
         <div
-          className="bg-hx-panel border border-hx-border group-hover:border-hx-neon/20 transition-colors p-4 relative"
-          style={{ borderTop: `2px solid ${accent}` }}
+          className="bg-hx-panel border border-hx-border group-hover:border-hx-neon/20 group-hover:-translate-y-0.5 transition-all duration-150 ease-out p-4 relative"
         >
+          {/* Accent bar — slides up and fades out on hover */}
+          <div
+            className="absolute top-0 left-0 right-0 h-[2px] transition-all duration-300 ease-out group-hover:-translate-y-1 group-hover:opacity-0"
+            style={{ background: accent }}
+          />
           {/* Header row */}
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2">

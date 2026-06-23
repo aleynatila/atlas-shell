@@ -6,6 +6,7 @@
 use ssh2::Session;
 use std::{
     collections::HashMap,
+    fs,
     io::{Read, Write},
     net::{SocketAddr, TcpStream, ToSocketAddrs},
     path::Path,
@@ -13,6 +14,7 @@ use std::{
     thread,
     time::Duration,
 };
+use tauri::Manager;
 use socket2::{Socket, Domain, Type, Protocol};
 use memmap2;
 use once_cell::sync::Lazy;
@@ -300,6 +302,65 @@ fn resize_pty(session_id: String, cols: u32, rows: u32) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn get_remote_cwd(
+    host: String,
+    port: u16,
+    user: String,
+    pass: String,
+    key_path: Option<String>,
+) -> Result<String, String> {
+    let addr_str = format!("{}:{}", host, port);
+    let sock_addr: SocketAddr = addr_str
+        .parse()
+        .or_else(|_| {
+            addr_str
+                .to_socket_addrs()
+                .map_err(|e| e.to_string())
+                .and_then(|mut a| a.next().ok_or_else(|| "could not resolve host".into()))
+        })
+        .map_err(|e| e.to_string())?;
+
+    let tcp = TcpStream::connect_timeout(&sock_addr, Duration::from_secs(8))
+        .map_err(|e| e.to_string())?;
+
+    let mut sess = Session::new().map_err(|e| e.to_string())?;
+    sess.set_timeout(8_000);
+    sess.set_tcp_stream(tcp);
+    sess.handshake().map_err(|e| e.to_string())?;
+
+    let pass = Zeroizing::new(pass);
+    let mut authed = false;
+    if let Some(ref kp) = key_path {
+        let pk = Path::new(kp);
+        if sess.userauth_pubkey_file(&user, None, pk, None).is_ok() && sess.authenticated() {
+            authed = true;
+        }
+    }
+    if !authed {
+        if sess.userauth_password(&user, &*pass).is_ok() && sess.authenticated() {
+            authed = true;
+        }
+    }
+    if !authed {
+        let mut kbd = PasswordKbdAuth((*pass).clone());
+        if sess.userauth_keyboard_interactive(&user, &mut kbd).is_ok() && sess.authenticated() {
+            authed = true;
+        }
+    }
+    if !authed {
+        return Err("authentication failed".into());
+    }
+
+    let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
+    channel.exec("pwd").map_err(|e| e.to_string())?;
+    let mut output = String::new();
+    channel.read_to_string(&mut output).map_err(|e| e.to_string())?;
+    channel.wait_close().ok();
+
+    Ok(output.trim().to_string())
+}
+
+#[tauri::command]
 fn stop_ssh_session(session_id: String) -> Result<(), String> {
     let tx = SESS_TX.lock().map_err(|_| "lock poisoned".to_string())?.remove(&session_id);
     if let Some(tx) = tx {
@@ -311,7 +372,7 @@ fn stop_ssh_session(session_id: String) -> Result<(), String> {
 
 
 #[derive(Serialize, Clone)]
-struct SftpProgress {
+struct SCPProgress {
     id: String,
     bytes_sent: u64,
     total: u64,
@@ -334,7 +395,7 @@ fn upload_file_scp(
     remote_dir: String,
 ) -> Result<(), String> {
     // Emit immediately so the UI registers the transfer before the thread even starts
-    let _ = app_handle.emit("sftp-progress", SftpProgress {
+    let _ = app_handle.emit("SCP-progress", SCPProgress {
         id: transfer_id.clone(),
         bytes_sent: 0,
         total: 0,
@@ -350,7 +411,7 @@ fn upload_file_scp(
             key_path.as_deref(), &local_path, &remote_dir,
         );
         if let Err(e) = result {
-            let _ = app_handle.emit("sftp-progress", SftpProgress {
+            let _ = app_handle.emit("SCP-progress", SCPProgress {
                 id: transfer_id,
                 bytes_sent: 0,
                 total: 0,
@@ -441,7 +502,7 @@ fn do_scp_upload(
     }
 
     // Emit 0% / Connecting state immediately
-    let _ = app.emit("sftp-progress", SftpProgress {
+    let _ = app.emit("SCP-progress", SCPProgress {
         id: transfer_id.to_string(),
         bytes_sent: 0,
         total,
@@ -477,7 +538,7 @@ fn do_scp_upload(
 
             if offset - last_progress >= PROGRESS_INTERVAL || offset >= total {
                 last_progress = offset;
-                let _ = app.emit("sftp-progress", SftpProgress {
+                let _ = app.emit("SCP-progress", SCPProgress {
                     id: transfer_id.to_string(),
                     bytes_sent: offset,
                     total,
@@ -500,7 +561,7 @@ fn do_scp_upload(
     channel.close().map_err(|e| e.to_string())?;
     channel.wait_close().map_err(|e| e.to_string())?;
 
-    let _ = app.emit("sftp-progress", SftpProgress {
+    let _ = app.emit("SCP-progress", SCPProgress {
         id: transfer_id.to_string(),
         bytes_sent: total,
         total,
@@ -545,6 +606,33 @@ fn delete_credential(id: String) -> Result<(), String> {
     }
 }
 
+/// Read a value from the persistent app-data store.
+/// Files live in {app_data_dir}/store/{key} and survive reinstalls, WebView2
+/// profile wipes, and origin changes (tauri:// vs http://localhost).
+#[tauri::command]
+fn read_store(app_handle: tauri::AppHandle, key: String) -> Result<Option<String>, String> {
+    let data_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let path = data_dir.join("store").join(&key);
+    match fs::read_to_string(&path) {
+        Ok(content) => Ok(Some(content)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Write a value to the persistent app-data store.
+#[tauri::command]
+fn write_store(app_handle: tauri::AppHandle, key: String, value: String) -> Result<(), String> {
+    let data_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let store_dir = data_dir.join("store");
+    fs::create_dir_all(&store_dir).map_err(|e| e.to_string())?;
+    let path = store_dir.join(&key);
+    // Write to a temp file then rename so a crash mid-write never corrupts the store
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, &value).map_err(|e| e.to_string())?;
+    fs::rename(&tmp, &path).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn debug_log(message: String) -> Result<(), String> {
     println!("{}", message);
@@ -561,11 +649,14 @@ fn main() {
         start_ssh_session,
         send_ssh_input,
         stop_ssh_session,
+        get_remote_cwd,
         resize_pty,
         upload_file_scp,
         set_credential,
         get_credential,
         delete_credential,
+        read_store,
+        write_store,
         debug_log,
     ])
         .run(tauri::generate_context!())

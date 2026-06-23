@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { ScriptsBar } from "./components/ScriptsBar";
 import {
     useCallback,
     useDeferredValue,
@@ -543,7 +544,7 @@ function App() {
         >
           {/* Overview */}
           <div
-            className={`absolute inset-0 flex overflow-hidden ${isOverview ? "" : "invisible"}`}
+            className={`absolute inset-0 flex overflow-hidden ${isOverview ? "" : "hidden"}`}
           >
             <Overview
               sessions={sessions}
@@ -572,7 +573,7 @@ function App() {
 
           {/* Terminal view */}
           <div
-            className={`absolute inset-0 flex flex-col overflow-hidden ${isOverview ? "invisible" : ""}`}
+            className={`absolute inset-0 flex flex-col overflow-hidden ${isOverview ? "hidden" : ""}`}
           >
             {/* Terminal pane(s) */}
             <div
@@ -680,50 +681,11 @@ function App() {
 
             {/* Quick Commands bar */}
             {activeTab && (
-              <div
-                className="flex items-center gap-1.5 px-3 py-1 border-t border-hx-border shrink-0 overflow-x-auto select-none"
-                style={{ background: "#080A12" }}
-              >
-                <span className="text-[10px] text-hx-dim tracking-widest uppercase mr-1 shrink-0">
-                  CMD
-                </span>
-                {scripts.filter((sc) => !sc.group || sc.group === activeTab.sessionEntry.group).map((sc) => (
-                  <button
-                    key={sc.id}
-                    onClick={() => {
-                      if (activeTab.sshSessionId) {
-                        invoke("send_ssh_input", {
-                          sessionId: activeTab.sshSessionId,
-                          input: sc.content.endsWith("\n")
-                            ? sc.content
-                            : sc.content + "\n",
-                        }).catch(() => {});
-                        setTimeout(
-                          () =>
-                            paneRefs.current[activeTab.tabId] &&
-                            (
-                              paneRefs.current[
-                                activeTab.tabId
-                              ] as HTMLDivElement & {
-                                __term?: { focus: () => void };
-                              }
-                            ).__term?.focus?.(),
-                          50,
-                        );
-                      }
-                    }}
-                    title={sc.content}
-                    className="px-2 py-0.5 text-[11px] font-mono bg-hx-neon/10 text-hx-neon border border-hx-neon/20 rounded hover:bg-hx-neon/25 transition-colors whitespace-nowrap shrink-0"
-                  >
-                    {sc.name}
-                  </button>
-                ))}
-                {scripts.length === 0 && (
-                  <span className="text-[10px] text-hx-dim font-mono italic">
-                    No quick commands — add them in Settings → Scripts
-                  </span>
-                )}
-              </div>
+              <ScriptsBar
+                scripts={scripts}
+                activeTab={activeTab}
+                paneRefs={paneRefs}
+              />
             )}
           </div>
         </div>

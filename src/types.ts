@@ -38,7 +38,7 @@ export interface SshOutputPayload {
   output: string;
 }
 
-export interface SftpProgressPayload {
+export interface SCPProgressPayload {
   id: string;
   bytes_sent: number;
   total: number;

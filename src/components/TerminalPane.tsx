@@ -1,4 +1,8 @@
 import { getVersion as getAppVersion } from "@tauri-apps/api/app";
+
+// Cached at module level so every TerminalPane instance shares the same
+// resolved value and we never call getAppVersion() more than once.
+const _appVersionPromise: Promise<string> = getAppVersion().catch(() => "");
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
@@ -15,12 +19,12 @@ import { TERMINAL_THEME } from "../themes";
 import type {
     DragDropPayload,
     DragOverPayload,
-    SftpProgressPayload,
+    SCPProgressPayload,
     SshOutputPayload,
     TabPane,
     TransferMap,
 } from "../types";
-import { SftpToast } from "./SftpToast";
+import { SCPToast } from "./SftpToast";
 
 interface TerminalPaneProps {
   pane: TabPane;
@@ -70,13 +74,15 @@ export const TerminalPane = memo(function TerminalPane({
   const pendingFontUpdateRef = useRef(false);
   const disableAlternateScreenRef = useRef(disableAlternateScreen ?? false);
   disableAlternateScreenRef.current = disableAlternateScreen ?? false;
+  const passwordRef = useRef(password);
+  passwordRef.current = password;
   const escapeSequenceRemainderRef = useRef("");
 
   const [dragOver, setDragOver] = useState(false);
   const [connecting, setConnecting] = useState(false);
-  const [sftpFiles, setSftpFiles] = useState<string[]>([]);
-  const [sftpRemoteDir, setSftpRemoteDir] = useState("~");
-  const [sftpTransfers, setSftpTransfers] = useState<TransferMap>({});
+  const [SCPFiles, setSCPFiles] = useState<string[]>([]);
+  const [SCPRemoteDir, setSCPRemoteDir] = useState("");
+  const [SCPTransfers, setSCPTransfers] = useState<TransferMap>({});
   const [currentCwd, setCurrentCwd] = useState("~");
   const currentCwdRef = useRef("~");
   // Reconnect storm guard: track consecutive auto-reconnect attempts
@@ -85,21 +91,21 @@ export const TerminalPane = memo(function TerminalPane({
   // Credentials entered via the in-terminal prompt — reused for auto-reconnect
   // so sessions without saved passwords can reconnect after a disconnect.
   const lastTypedCredsRef = useRef<{ user: string; pass: string } | null>(null);
+  // Set when the backend emits "authentication failed" so [disconnected]
+  // handler shows prompt instead of auto-reconnecting with bad creds.
+  const authFailedRef = useRef(false);
   const MAX_AUTO_RECONNECTS = 3;
   const RECONNECT_DELAY_MS = 3000;
-  const appVersionRef = useRef("…");
+  const appVersionRef = useRef("");
   const isTauriRuntime =
     typeof window !== "undefined" &&
     typeof (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ ===
       "object";
 
   useEffect(() => {
-    if (!isTauriRuntime) return;
-    getAppVersion()
-      .then((v) => {
-        appVersionRef.current = v;
-      })
-      .catch(() => {});
+    _appVersionPromise.then((v) => {
+      appVersionRef.current = v;
+    });
   }, []);
 
   function invokeSafe<T = unknown>(
@@ -212,9 +218,10 @@ export const TerminalPane = memo(function TerminalPane({
         );
         if (!isAltScreen) return sequence;
 
-        // On exit (l), clear scrollback + screen so nano's UI is fully
-        // removed from the normal buffer before the shell prompt appears.
-        if (modeChar === "l") return "\x1b[3J\x1b[H";
+        // On exit (l), clear the visible screen so nano's UI is removed
+        // before the shell prompt redraws. \x1b[2J erases the display;
+        // \x1b[H moves cursor to home so the shell prompt lands at top-left.
+        if (modeChar === "l") return "\x1b[2J\x1b[H";
 
         // On enter (h), just strip — we never switch buffers.
         return "";
@@ -262,10 +269,34 @@ export const TerminalPane = memo(function TerminalPane({
 
         setDragOver(false);
         if (Array.isArray(paths) && paths.length > 0) {
-          // CWD is kept fresh by the OSC 7 handler on every shell prompt,
-          // so we can read it synchronously instead of round-tripping `pwd`.
-          setSftpRemoteDir(currentCwdRef.current || "~");
-          setSftpFiles(paths);
+          setSCPFiles(paths);
+
+          // Scan the terminal buffer backwards from the cursor to find the
+          // most recent shell prompt and extract its path component.
+          // e.g. "root@host:/playroom# " → "/playroom"
+          const term = termRef.current;
+          let detectedCwd = "";
+          if (term) {
+            const buf = term.buffer.active;
+            const startLine = buf.baseY + buf.cursorY;
+            const PROMPT_RE = /[\w.-]+@[\w.-]+:([^#$\s]+)[#$]/;
+            for (let i = startLine; i >= Math.max(0, startLine - 20); i--) {
+              const line = buf.getLine(i)?.translateToString().trim() ?? "";
+              const m = line.match(PROMPT_RE);
+              if (m?.[1]) {
+                detectedCwd = m[1];
+                break;
+              }
+            }
+          }
+
+          if (detectedCwd) {
+            setSCPRemoteDir(
+              detectedCwd === "~" ? currentCwdRef.current || "~" : detectedCwd,
+            );
+          } else {
+            setSCPRemoteDir(currentCwdRef.current || "~");
+          }
         }
       }),
       listenSafe("tauri://drag-over", (e) => {
@@ -294,15 +325,15 @@ export const TerminalPane = memo(function TerminalPane({
     };
   }, [isTauriRuntime, visible]);
 
-  // Listen to sftp-progress events
+  // Listen to SCP-progress events
   useEffect(() => {
     if (!visible || !isTauriRuntime) return;
     const unlisteners: Array<() => void> = [];
     let mounted = true;
 
-    listenSafe("sftp-progress", (e) => {
-      const p = e.payload as SftpProgressPayload;
-      setSftpTransfers((prev) => {
+    listenSafe("SCP-progress", (e) => {
+      const p = e.payload as SCPProgressPayload;
+      setSCPTransfers((prev) => {
         // Only handle progress for transfers THIS pane started.
         // app.emit_all() broadcasts to all webviews; ignoring unknown IDs
         // prevents other panes' uploads from leaking into this pane's toast,
@@ -341,9 +372,9 @@ export const TerminalPane = memo(function TerminalPane({
     };
   }, [isTauriRuntime, visible]);
 
-  function startSftpUpload() {
+  function startSCPUpload() {
     const transfers: TransferMap = {};
-    sftpFiles.forEach((fp) => {
+    SCPFiles.forEach((fp) => {
       const id = crypto.randomUUID();
       const name = fp.split(/[\\/]/).pop() || fp;
       transfers[id] = { name, progress: 0, done: false };
@@ -355,9 +386,9 @@ export const TerminalPane = memo(function TerminalPane({
         pass: pane.sessionEntry.pass || password || "",
         keyPath: pane.sessionEntry.keyPath || null,
         localPath: fp,
-        remoteDir: sftpRemoteDir,
+        remoteDir: SCPRemoteDir || currentCwdRef.current,
       }).catch((err) => {
-        setSftpTransfers((prev) => {
+        setSCPTransfers((prev) => {
           const existing = prev[id];
           if (!existing) return prev;
           return {
@@ -367,8 +398,8 @@ export const TerminalPane = memo(function TerminalPane({
         });
       });
     });
-    setSftpTransfers((prev) => ({ ...prev, ...transfers }));
-    setSftpFiles([]);
+    setSCPTransfers((prev) => ({ ...prev, ...transfers }));
+    setSCPFiles([]);
   }
 
   useEffect(() => {
@@ -460,20 +491,24 @@ export const TerminalPane = memo(function TerminalPane({
       } catch (_) {}
       term.focus();
     }, 150);
-    term.write("\x1b[36m\x1b[2m╔══════════════════════════╗\x1b[0m\r\n");
-    term.write(
-      `\x1b[36m\x1b[2m║  ATLAS TERMINAL  v${appVersionRef.current.padEnd(6)}║\x1b[0m\r\n`,
-    );
-    term.write("\x1b[36m\x1b[2m╚══════════════════════════╝\x1b[0m\r\n\r\n");
-    term.write(
-      `\x1b[35m◆ Target:\x1b[0m \x1b[36m${pane.sessionEntry.user}@${pane.sessionEntry.host}:${pane.sessionEntry.port}\x1b[0m\r\n`,
-    );
-    const needsPrompt =
-      !pane.sessionEntry.pass && !pane.sessionEntry.keyPath && !password;
-    if (needsPrompt) {
-      term.write(`\r\nlogin as: `);
-      promptRef.current = { stage: "user", user: "", pass: "" };
-    }
+    _appVersionPromise.then((ver) => {
+      appVersionRef.current = ver;
+      if (!termRef.current) return;
+      term.write("\x1b[36m\x1b[2m╔══════════════════════════╗\x1b[0m\r\n");
+      term.write(
+        `\x1b[36m\x1b[2m║  ATLAS TERMINAL  v${(ver || "…").padEnd(6)}║\x1b[0m\r\n`,
+      );
+      term.write("\x1b[36m\x1b[2m╚══════════════════════════╝\x1b[0m\r\n\r\n");
+      term.write(
+        `\x1b[35m◆ Target:\x1b[0m \x1b[36m${pane.sessionEntry.user}@${pane.sessionEntry.host}:${pane.sessionEntry.port}\x1b[0m\r\n`,
+      );
+      const needsPrompt =
+        !pane.sessionEntry.pass && !pane.sessionEntry.keyPath && !password;
+      if (needsPrompt) {
+        term.write(`\r\nlogin as: `);
+        promptRef.current = { stage: "user", user: "", pass: "" };
+      }
+    });
     termRef.current = term;
     fitRef.current = fitAddon;
 
@@ -614,6 +649,13 @@ export const TerminalPane = memo(function TerminalPane({
     const handleResize = () => {
       if (!termRef.current) return; // already disposed — do not touch xterm internals
       if (!visibleRef.current) return; // skip resize work for hidden panes
+      // Skip when container has no dimensions (parent is display:none)
+      if (
+        !containerRef.current ||
+        containerRef.current.offsetWidth === 0 ||
+        containerRef.current.offsetHeight === 0
+      )
+        return;
       if (resizeTimer !== null) clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
         resizeTimer = null;
@@ -733,17 +775,42 @@ export const TerminalPane = memo(function TerminalPane({
       termRef.current = null;
       fitRef.current = null;
       webglRef.current = null;
+      // WebGL addon dispose enqueues a resize task via RenderService's own
+      // IdleTaskQueue. That task fires async (requestIdleCallback) after the
+      // renderer is already null, crashing with "cannot read handleResize of
+      // undefined". Patch every known IdleTaskQueue to a no-op _process so
+      // any pending/newly-enqueued callbacks are silently swallowed.
+      try {
+        const core = (term as any)._core;
+        const silenceQueue = (q: any) => {
+          if (!q) return;
+          q._queue = [];
+          q._process = () => {};
+        };
+        silenceQueue(core?._idleTaskQueue);
+        silenceQueue(core?._renderService?._idleTaskQueue);
+        // Null out the renderer reference so any task that slips through
+        // finds nothing to crash on.
+        if (core?._renderService) core._renderService._renderer = null;
+      } catch (_) {}
       if (webglToDispose) {
         try {
           webglToDispose.dispose();
         } catch (_) {}
+        // Silence again after dispose in case it registered new tasks.
+        try {
+          const core = (term as any)._core;
+          const silenceQueue = (q: any) => {
+            if (!q) return;
+            q._queue = [];
+            q._process = () => {};
+          };
+          silenceQueue(core?._idleTaskQueue);
+          silenceQueue(core?._renderService?._idleTaskQueue);
+        } catch (_) {}
       }
-      // Clear xterm's internal IdleTaskQueue before dispose so pending idle
-      // callbacks (e.g. ViewportOverscanService.handleResize) don't fire after
-      // the terminal services are torn down.
       try {
         const core = (term as any)._core;
-        if (core?._idleTaskQueue?._queue) core._idleTaskQueue._queue = [];
         if (core?._viewport) core._viewport.dispose?.();
       } catch (_) {}
       try {
@@ -861,31 +928,6 @@ export const TerminalPane = memo(function TerminalPane({
           setConnecting(false);
           reconnectCountRef.current = 0; // reset on successful connect
           onConnected(pane.tabId, sshId);
-          // Shell integration: register an OSC 7 emitter so the remote shell
-          // reports its CWD after every prompt. Bash uses PROMPT_COMMAND; zsh
-          // uses precmd_functions. Both branches are guarded so the line is a
-          // no-op on shells that don't recognise the variables (sh/dash just
-          // sets an unused variable). The trailing `\r` is harmless ENTER so
-          // the first prompt re-draws cleanly even if the line was absorbed
-          // before the shell finished printing it.
-          // NOTE: this single line will echo once at the top of the session.
-          // That is the same tradeoff VS Code / WezTerm shell integration make.
-          const oscInit =
-            ` __atlas_osc7(){ printf '\\033]7;file://%s\\033\\\\' \"$PWD\"; };` +
-            ` if [ -n \"$ZSH_VERSION\" ]; then typeset -ga precmd_functions;` +
-            ` precmd_functions=(__atlas_osc7 \${precmd_functions[@]});` +
-            ` else PROMPT_COMMAND=\"__atlas_osc7\${PROMPT_COMMAND:+;$PROMPT_COMMAND}\"; fi;` +
-            ` __atlas_osc7\n`;
-          // Delay slightly so the remote shell has printed its first prompt
-          // and is ready to read input — sending too early can race with motd.
-          setTimeout(() => {
-            if (sshIdRef.current === sshId) {
-              invokeSafe("send_ssh_input", {
-                sessionId: sshId,
-                input: oscInit,
-              }).catch(() => {});
-            }
-          }, 400);
           listenSafe(`ssh-output-${sshId}`, (event) => {
             // Discard events from a session that is no longer current.
             // This handles the race where auth fails before the listenSafe()
@@ -893,6 +935,12 @@ export const TerminalPane = memo(function TerminalPane({
             // the user reconnects, so the old listener survives briefly.
             if (sshIdRef.current !== sshId) return;
             const payload = event.payload as SshOutputPayload;
+
+            // Detect auth failure so [disconnected] handler shows prompt
+            // instead of retrying with the same bad credentials.
+            if (payload.output.includes("authentication failed")) {
+              authFailedRef.current = true;
+            }
 
             // Detect session termination signals from the Rust backend.
             // "[disconnected]" is always the final event emitted; clean up
@@ -905,6 +953,16 @@ export const TerminalPane = memo(function TerminalPane({
               }
               term.write("\r\n\x1b[90m[disconnected]\x1b[0m\r\n");
               onDisconnected(pane.tabId);
+
+              // Auth failed → clear bad creds and ask again immediately.
+              if (authFailedRef.current) {
+                authFailedRef.current = false;
+                lastTypedCredsRef.current = null;
+                term.write("\r\nlogin as: ");
+                promptRef.current = { stage: "user", user: "", pass: "" };
+                return;
+              }
+
               const lc = lastTypedCredsRef.current;
               const hasCreds = !!(
                 pane.sessionEntry.pass ||
@@ -1101,12 +1159,12 @@ export const TerminalPane = memo(function TerminalPane({
   }
 
   const activeTransfers = useMemo(
-    () => Object.entries(sftpTransfers).filter(([, v]) => !v.done || v.error),
-    [sftpTransfers],
+    () => Object.entries(SCPTransfers).filter(([, v]) => !v.done || v.error),
+    [SCPTransfers],
   );
   const doneTransfers = useMemo(
-    () => Object.entries(sftpTransfers).filter(([, v]) => v.done && !v.error),
-    [sftpTransfers],
+    () => Object.entries(SCPTransfers).filter(([, v]) => v.done && !v.error),
+    [SCPTransfers],
   );
 
   return (
@@ -1157,20 +1215,20 @@ export const TerminalPane = memo(function TerminalPane({
       {dragOver && (
         <div className="absolute inset-0 bg-hx-neon/10 border-2 border-dashed border-hx-neon flex items-center justify-center z-20 pointer-events-none">
           <div className="text-hx-neon text-sm font-mono tracking-widest">
-            DROP FILES TO UPLOAD VIA SFTP
+            DROP FILES TO UPLOAD VIA SCP
           </div>
         </div>
       )}
 
-      {/* SFTP file confirm dialog */}
-      {sftpFiles.length > 0 && (
+      {/* SCP file confirm dialog */}
+      {SCPFiles.length > 0 && (
         <div className="absolute inset-0 bg-black/70 flex items-center justify-center z-30">
           <div className="bg-hx-panel border border-hx-neon/30 rounded p-4 w-80 flex flex-col gap-3">
             <div className="text-hx-neon text-xs font-bold tracking-widest uppercase">
-              Upload via SFTP
+              Upload via SCP
             </div>
             <div className="text-xs text-hx-muted">Files:</div>
-            {sftpFiles.map((fp) => (
+            {SCPFiles.map((fp) => (
               <div key={fp} className="text-xs text-hx-text font-mono truncate">
                 {fp.split(/[\\/]/).pop()}
               </div>
@@ -1179,24 +1237,25 @@ export const TerminalPane = memo(function TerminalPane({
               <label className="text-xs text-hx-muted">Remote directory</label>
               <input
                 className="hx-input text-xs px-2 py-1"
-                value={sftpRemoteDir || currentCwd}
-                onChange={(e) => setSftpRemoteDir(e.target.value)}
+                value={SCPRemoteDir || currentCwd}
+                onChange={(e) => setSCPRemoteDir(e.target.value)}
                 placeholder="~/uploads"
               />
-              <span className="text-[10px] text-hx-dim font-mono">
-                SSH terminalindeki mevcut kod dizini otomatik doldurulur (
-                {currentCwd})
-              </span>
+              {currentCwd && currentCwd !== "~" && (
+                <span className="text-[10px] text-hx-dim font-mono">
+                  Terminal CWD: {currentCwd}
+                </span>
+              )}
             </div>
             <div className="flex gap-2 justify-end">
               <button
-                onClick={() => setSftpFiles([])}
+                onClick={() => setSCPFiles([])}
                 className="px-3 py-1 text-xs text-hx-muted hover:text-hx-text transition-colors"
               >
                 Cancel
               </button>
               <button
-                onClick={startSftpUpload}
+                onClick={startSCPUpload}
                 className="px-3 py-1 text-xs bg-hx-neon/20 text-hx-neon border border-hx-neon/30 rounded hover:bg-hx-neon/30 transition-colors"
               >
                 Upload
@@ -1206,21 +1265,21 @@ export const TerminalPane = memo(function TerminalPane({
         </div>
       )}
 
-      {/* SFTP Transfer Toast */}
+      {/* SCP Transfer Toast */}
       {(activeTransfers.length > 0 || doneTransfers.length > 0) && (
-        <SftpToast
-          transfers={sftpTransfers}
+        <SCPToast
+          transfers={SCPTransfers}
           activeTransfers={activeTransfers}
           doneTransfers={doneTransfers}
           onDismiss={(id) =>
-            setSftpTransfers((prev) => {
+            setSCPTransfers((prev) => {
               const n = { ...prev };
               delete n[id];
               return n;
             })
           }
           onClearDone={() =>
-            setSftpTransfers((prev) => {
+            setSCPTransfers((prev) => {
               const n: TransferMap = {};
               for (const [k, v] of Object.entries(prev)) {
                 if (!v.done) n[k] = v;
