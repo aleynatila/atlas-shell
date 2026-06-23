@@ -1,6 +1,6 @@
 # rsync binaries (cwRsync)
 
-Atlas uses rsync as the fastest file transfer protocol (3-10x faster than SFTP).
+Atlas uses rsync as the fastest file transfer protocol (3-10x faster than SCP).
 The binaries are **not committed** to git (too large / license). You must add them manually.
 
 ## How to get them
@@ -14,5 +14,5 @@ The binaries are **not committed** to git (too large / license). You must add th
 
 ## Without these files
 
-Atlas still works — it automatically falls back to **SCP** (fast) and then **SFTP** (safe).
+Atlas still works — it automatically falls back to **SCP** (fast) and then **SCP** (safe).
 rsync is only used when the binaries are present AND the session uses key-based auth.

@@ -42,9 +42,9 @@
 
 <br /><br />
 
-<!-- Screenshot 5: SFTP drag-drop -->
-<img src="docs/screenshots/sftp.png" alt="SFTP File Transfer" width="100%" />
-<sub>Drag-and-drop SFTP file upload with live progress</sub>
+<!-- Screenshot 5: SCP drag-drop -->
+<img src="docs/screenshots/SCP.png" alt="SCP File Transfer" width="100%" />
+<sub>Drag-and-drop SCP file upload with live progress</sub>
 
 </div>
 
@@ -52,21 +52,21 @@
 
 ## Features
 
-| Feature                   | Description                                                                            |
-| ------------------------- | -------------------------------------------------------------------------------------- |
-| **Multi-tab SSH**         | Open multiple SSH sessions simultaneously, switch instantly                            |
-| **Split Terminal**        | Side-by-side or stacked terminal panes                                                 |
-| **SFTP Drag & Drop**      | Drag files from Explorer onto a pane to upload via SFTP — position-aware in split view |
-| **Session Management**    | Save sessions with labels, colors, groups; import from Solar-PuTTY                     |
-| **Credentials Vault**     | Reusable credentials (user/pass/key) stored in the OS keychain                         |
-| **Quick Commands**        | Configurable command bar — one click sends a command to the active terminal            |
-| **Script Library**        | Save and run multi-line scripts on any session                                         |
-| **PuTTY-style Clipboard** | Auto-copy on selection, right-click to paste                                           |
-| **Custom Title Bar**      | Frameless window with built-in minimize/maximize/close controls                        |
-| **Dark UI**               | Neon-accented dark theme with per-session accent colors                                |
-| **Auto-connect**          | Sessions can be configured to connect on open                                          |
-| **Auto-update**           | Built-in updater checks for new releases and installs with one click                   |
-| **Solar-PuTTY Import**    | Import sessions and credentials from Solar-PuTTY JSON export                           |
+| Feature                   | Description                                                                           |
+| ------------------------- | ------------------------------------------------------------------------------------- |
+| **Multi-tab SSH**         | Open multiple SSH sessions simultaneously, switch instantly                           |
+| **Split Terminal**        | Side-by-side or stacked terminal panes                                                |
+| **SCP Drag & Drop**       | Drag files from Explorer onto a pane to upload via SCP — position-aware in split view |
+| **Session Management**    | Save sessions with labels, colors, groups; import from Solar-PuTTY                    |
+| **Credentials Vault**     | Reusable credentials (user/pass/key) stored in the OS keychain                        |
+| **Quick Commands**        | Configurable command bar — one click sends a command to the active terminal           |
+| **Script Library**        | Save and run multi-line scripts on any session                                        |
+| **PuTTY-style Clipboard** | Auto-copy on selection, right-click to paste                                          |
+| **Custom Title Bar**      | Frameless window with built-in minimize/maximize/close controls                       |
+| **Dark UI**               | Neon-accented dark theme with per-session accent colors                               |
+| **Auto-connect**          | Sessions can be configured to connect on open                                         |
+| **Auto-update**           | Built-in updater checks for new releases and installs with one click                  |
+| **Solar-PuTTY Import**    | Import sessions and credentials from Solar-PuTTY JSON export                          |
 
 ---
 
@@ -77,7 +77,7 @@
 | **Shell/Desktop**     | [Tauri](https://tauri.app) v2 (Rust)                       |
 | **Frontend**          | React 18 + TypeScript                                      |
 | **Terminal Emulator** | [xterm.js](https://xtermjs.org) v5.3 + FitAddon            |
-| **SSH / SFTP**        | [ssh2](https://crates.io/crates/ssh2) Rust crate (libssh2) |
+| **SSH / SCP**         | [ssh2](https://crates.io/crates/ssh2) Rust crate (libssh2) |
 | **Clipboard**         | tauri-plugin-clipboard-manager                             |
 | **Updater**           | tauri-plugin-updater                                       |
 | **Styling**           | Tailwind CSS v4                                            |
@@ -156,7 +156,7 @@ atlas/
 │   ├── capabilities/
 │   │   └── default.json        # Tauri v2 permission declarations
 │   ├── src/
-│   │   └── main.rs             # SSH session management, SFTP upload
+│   │   └── main.rs             # SSH session management, SCP upload
 │   ├── Cargo.toml
 │   └── tauri.conf.json         # Window config, bundle, plugins
 ├── docs/

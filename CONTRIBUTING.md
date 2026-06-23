@@ -34,7 +34,7 @@ atlas/
 │   ├── index.css             # Global styles
 │   └── themes.ts             # Color themes
 ├── src-tauri/                # Tauri + Rust backend
-│   ├── src/main.rs           # SSH/SFTP server
+│   ├── src/main.rs           # SSH/SCP server
 │   ├── Cargo.toml            # Rust dependencies
 │   └── tauri.conf.json       # Tauri config
 ├── docs/                     # Documentation
