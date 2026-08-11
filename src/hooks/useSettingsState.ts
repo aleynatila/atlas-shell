@@ -10,6 +10,8 @@ const DEFAULT_GENERAL: GeneralSettings = {
   autoCheckUpdates: false,
   updatePermissionAsked: false,
   disableAlternateScreen: false,
+  predictiveEcho: "off",
+  predictiveEchoThresholdMs: 80,
 };
 
 export function useTags() {

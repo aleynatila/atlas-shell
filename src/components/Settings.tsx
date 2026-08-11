@@ -1486,6 +1486,74 @@ export function Settings({
                   </button>
                 </div>
               </div>
+              {/* Predictive local echo */}
+              <div className="pt-2 border-t border-hx-border space-y-2">
+                <label className="block text-[10px] font-mono uppercase tracking-widest text-hx-neon/60">
+                  Predictive Local Echo (Experimental)
+                </label>
+                <p className="text-[10px] text-hx-dim font-mono leading-relaxed">
+                  Yüksek gecikmeli bağlantılarda yazdığın karakterleri
+                  sunucudan yanıt beklemeden ekranda göster (Mosh benzeri).
+                  <span className="text-hx-muted">
+                    {" "}
+                    Tahmin sadece regex tabanlı bir sezgiyle tespit edilir;
+                    lokalize/alışılmadık şifre istemlerinde (sudo, passwd vb.)
+                    tahmini karakterler kısa süreliğine ekranda görünebilir.
+                    Bu yüzden varsayılan olarak kapalıdır.
+                  </span>
+                </p>
+                <div className="flex gap-2">
+                  {(["off", "auto", "always"] as const).map((mode) => {
+                    const isActive =
+                      (generalSettings.predictiveEcho ?? "off") === mode;
+                    return (
+                      <button
+                        key={mode}
+                        onClick={() =>
+                          saveGeneral({
+                            ...generalSettings,
+                            predictiveEcho: mode,
+                          })
+                        }
+                        className={`px-3 py-1.5 text-[10px] font-mono uppercase tracking-widest hx-clip-btn transition-all ${
+                          isActive
+                            ? "border border-hx-neon/70 bg-hx-neon/10 text-hx-neon"
+                            : "border border-hx-border text-hx-dim hover:border-hx-neon/40 hover:bg-hx-neon/5"
+                        }`}
+                      >
+                        {mode === "off"
+                          ? "Off"
+                          : mode === "auto"
+                            ? "Auto"
+                            : "Always"}
+                      </button>
+                    );
+                  })}
+                </div>
+                {(generalSettings.predictiveEcho ?? "off") === "auto" && (
+                  <div className="flex items-center gap-2 pt-1">
+                    <label className="text-[10px] font-mono uppercase tracking-widest text-hx-dim">
+                      Threshold (ms)
+                    </label>
+                    <input
+                      type="number"
+                      min={20}
+                      max={2000}
+                      value={generalSettings.predictiveEchoThresholdMs ?? 80}
+                      onChange={(e) =>
+                        saveGeneral({
+                          ...generalSettings,
+                          predictiveEchoThresholdMs: Math.max(
+                            20,
+                            Number(e.target.value) || 80,
+                          ),
+                        })
+                      }
+                      className="hx-input w-20 bg-hx-bg border border-hx-border px-2 py-1 text-xs font-mono"
+                    />
+                  </div>
+                )}
+              </div>
               {/* Theme picker */}
               <div className="pt-2 border-t border-hx-border space-y-2">
                 <label className="block text-[10px] font-mono uppercase tracking-widest text-hx-neon/60">

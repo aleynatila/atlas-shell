@@ -624,6 +624,10 @@ function App() {
                       disableAlternateScreen={
                         generalSettings.disableAlternateScreen ?? false
                       }
+                      predictiveEcho={generalSettings.predictiveEcho ?? "off"}
+                      predictiveEchoThresholdMs={
+                        generalSettings.predictiveEchoThresholdMs ?? 80
+                      }
                     />
                   </div>
                 ))}
@@ -671,6 +675,12 @@ function App() {
                         fontFamily={generalSettings.fontFamily}
                         disableAlternateScreen={
                           generalSettings.disableAlternateScreen ?? false
+                        }
+                        predictiveEcho={
+                          generalSettings.predictiveEcho ?? "off"
+                        }
+                        predictiveEchoThresholdMs={
+                          generalSettings.predictiveEchoThresholdMs ?? 80
                         }
                       />
                     </div>

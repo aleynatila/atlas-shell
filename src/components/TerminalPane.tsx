@@ -37,6 +37,8 @@ interface TerminalPaneProps {
   fontSize?: number;
   fontFamily?: string;
   disableAlternateScreen?: boolean;
+  predictiveEcho?: "off" | "auto" | "always";
+  predictiveEchoThresholdMs?: number;
 }
 
 export const TerminalPane = memo(function TerminalPane({
@@ -50,6 +52,8 @@ export const TerminalPane = memo(function TerminalPane({
   fontSize,
   fontFamily,
   disableAlternateScreen,
+  predictiveEcho,
+  predictiveEchoThresholdMs,
 }: TerminalPaneProps) {
   const promptRef = useRef<{
     stage: "user" | "pass";
@@ -77,6 +81,31 @@ export const TerminalPane = memo(function TerminalPane({
   const passwordRef = useRef(password);
   passwordRef.current = password;
   const escapeSequenceRemainderRef = useRef("");
+
+  // ── Predictive local echo state ──────────────────────────────────────────
+  const predictiveEchoModeRef = useRef(predictiveEcho ?? "off");
+  predictiveEchoModeRef.current = predictiveEcho ?? "off";
+  const predictiveEchoThresholdRef = useRef(predictiveEchoThresholdMs ?? 80);
+  predictiveEchoThresholdRef.current = predictiveEchoThresholdMs ?? 80;
+  // Tracks the single in-flight speculative run (absolute buffer rows, so
+  // it stays valid across scrollback). Only one run is tracked at a time —
+  // see plan doc for why per-cell diffing isn't used here.
+  const predictionRef = useRef<{
+    startY: number;
+    startX: number;
+    endY: number;
+    text: string;
+  } | null>(null);
+  const rttEwmaRef = useRef<number | null>(null);
+  const pendingRttSendRef = useRef<number | null>(null);
+  const predictiveActiveRef = useRef(false);
+  // Best-effort heuristic only — SSH has no protocol-level signal for
+  // mid-session remote-echo state changes (e.g. sudo/passwd prompts).
+  const passwordPromptSuspectedRef = useRef(false);
+  const passwordPromptTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const compositionActiveRef = useRef(false);
 
   const [dragOver, setDragOver] = useState(false);
   const [connecting, setConnecting] = useState(false);
@@ -230,6 +259,159 @@ export const TerminalPane = memo(function TerminalPane({
 
     escapeSequenceRemainderRef.current = remainder;
     return sanitized;
+  }
+
+  // ── Predictive local echo helpers ────────────────────────────────────────
+  // Only ordinary printable single characters are safe to guess — anything
+  // multi-byte (arrows, function keys, paste) or below 0x20 (Enter, Tab,
+  // Ctrl-sequences) is excluded by construction.
+  function isSpeculatableInsert(data: string) {
+    if (data.length !== 1) return false;
+    const code = data.charCodeAt(0);
+    return code >= 0x20 && code !== 0x7f;
+  }
+
+  function isSpeculatableBackspace(data: string) {
+    return data === "\x7f" || data === "\b";
+  }
+
+  function updatePredictiveActive() {
+    const mode = predictiveEchoModeRef.current;
+    if (mode === "off") {
+      predictiveActiveRef.current = false;
+      return;
+    }
+    if (mode === "always") {
+      predictiveActiveRef.current = true;
+      return;
+    }
+    const ewma = rttEwmaRef.current;
+    if (ewma === null) return; // no sample yet — keep previous state
+    const threshold = predictiveEchoThresholdRef.current;
+    // Hysteresis band avoids flapping on jittery links: arm above the
+    // threshold, only disarm once comfortably below it.
+    if (ewma > threshold) {
+      predictiveActiveRef.current = true;
+    } else if (ewma < threshold * 0.6) {
+      predictiveActiveRef.current = false;
+    }
+  }
+
+  function recordRttSample() {
+    const stamp = pendingRttSendRef.current;
+    if (stamp === null) return;
+    pendingRttSendRef.current = null;
+    const sample = performance.now() - stamp;
+    if (sample <= 0 || sample > 5000) return; // discard outliers
+    const prev = rttEwmaRef.current;
+    rttEwmaRef.current = prev === null ? sample : prev * 0.7 + sample * 0.3;
+    updatePredictiveActive();
+  }
+
+  function canSpeculate(): boolean {
+    if (!predictiveActiveRef.current) return false;
+    if (compositionActiveRef.current) return false;
+    if (passwordPromptSuspectedRef.current) return false;
+    const term = termRef.current;
+    if (!term) return false;
+    if (term.buffer.active.type === "alternate") return false;
+    return true;
+  }
+
+  function abandonPrediction() {
+    predictionRef.current = null;
+  }
+
+  function startOrExtendPrediction(char: string) {
+    const term = termRef.current;
+    if (!term) return;
+    const buf = term.buffer.active;
+    if (!predictionRef.current) {
+      predictionRef.current = {
+        startY: buf.baseY + buf.cursorY,
+        startX: buf.cursorX,
+        endY: buf.baseY + buf.cursorY,
+        text: "",
+      };
+    }
+    // Dim + underline distinguishes unconfirmed predicted text (Mosh-style).
+    term.write(`\x1b[2m\x1b[4m${char}\x1b[0m`);
+    const pred = predictionRef.current;
+    pred.text += char;
+    const after = term.buffer.active;
+    pred.endY = after.baseY + after.cursorY;
+  }
+
+  // Erases one predicted (not-yet-confirmed) character locally. Returns
+  // false if there is nothing of ours to erase, so the caller can fall back
+  // to forwarding the backspace and letting real output correct the screen.
+  function eraseLocalPredictionChar(): boolean {
+    const term = termRef.current;
+    const pred = predictionRef.current;
+    if (!term || !pred || pred.text.length === 0) return false;
+    pred.text = pred.text.slice(0, -1);
+    term.write("\x1b[D \x1b[D");
+    if (pred.text.length === 0) {
+      predictionRef.current = null;
+    } else {
+      const after = term.buffer.active;
+      pred.endY = after.baseY + after.cursorY;
+    }
+    return true;
+  }
+
+  // Erases the drawn-but-unconfirmed run (if still on-screen) so the
+  // authoritative bytes about to be written land in a clean spot. No
+  // per-cell diffing — the server's bytes always win outright.
+  function reconcilePrediction() {
+    const term = termRef.current;
+    const pred = predictionRef.current;
+    predictionRef.current = null;
+    if (!term || !pred || pred.text.length === 0) return;
+    const buf = term.buffer.active;
+    const viewportStartY = pred.startY - buf.baseY;
+    if (viewportStartY < 0) return; // scrolled off-screen — self-heals
+    const viewportEndY = Math.max(viewportStartY, pred.endY - buf.baseY);
+    term.write(`\x1b[${viewportStartY + 1};${pred.startX + 1}H\x1b[0K`);
+    for (let row = viewportStartY + 1; row <= viewportEndY; row++) {
+      term.write(`\x1b[${row + 1};1H\x1b[2K`);
+    }
+    term.write(`\x1b[${viewportStartY + 1};${pred.startX + 1}H`);
+  }
+
+  function armPasswordPromptSuspicion() {
+    passwordPromptSuspectedRef.current = true;
+    abandonPrediction();
+    if (passwordPromptTimeoutRef.current) {
+      clearTimeout(passwordPromptTimeoutRef.current);
+    }
+    // Safety net in case the trailing-newline clear below never fires.
+    passwordPromptTimeoutRef.current = setTimeout(() => {
+      passwordPromptSuspectedRef.current = false;
+      passwordPromptTimeoutRef.current = null;
+    }, 30000);
+  }
+
+  function clearPasswordPromptSuspicion() {
+    if (!passwordPromptSuspectedRef.current) return;
+    passwordPromptSuspectedRef.current = false;
+    if (passwordPromptTimeoutRef.current) {
+      clearTimeout(passwordPromptTimeoutRef.current);
+      passwordPromptTimeoutRef.current = null;
+    }
+  }
+
+  // Best-effort, not a security boundary: SSH has no protocol-level signal
+  // for remote echo state, so this only scans for common password-prompt
+  // text patterns at the tail of a chunk that hasn't ended in a newline.
+  function checkPasswordPrompt(chunk: string) {
+    if (/[\r\n]$/.test(chunk)) {
+      clearPasswordPromptSuspicion();
+      return;
+    }
+    if (/(?:assword|passphrase|parola)\s*(?:for\s+\S+)?:\s*$/i.test(chunk)) {
+      armPasswordPromptSuspicion();
+    }
   }
 
   useEffect(() => {
@@ -449,6 +631,11 @@ export const TerminalPane = memo(function TerminalPane({
       }),
     ];
     const onBufferChange = term.buffer.onBufferChange(() => {
+      // Full-screen apps (vim/htop/less) switch to the alt buffer — never
+      // safe to keep a speculative run alive once that happens.
+      if (term.buffer.active.type === "alternate" && predictionRef.current) {
+        abandonPrediction();
+      }
       debugLog(
         `buffer changed -> type=${term.buffer.active.type} baseY=${term.buffer.active.baseY} viewportY=${term.buffer.active.viewportY}`,
       );
@@ -584,6 +771,18 @@ export const TerminalPane = memo(function TerminalPane({
       });
     });
 
+    // IME composition (e.g. Turkish-Q, CJK input) must never be speculated —
+    // the committed character(s) can differ from any intermediate keystroke.
+    const handleCompositionStart = () => {
+      compositionActiveRef.current = true;
+      abandonPrediction();
+    };
+    const handleCompositionEnd = () => {
+      compositionActiveRef.current = false;
+    };
+    term.textarea?.addEventListener("compositionstart", handleCompositionStart);
+    term.textarea?.addEventListener("compositionend", handleCompositionEnd);
+
     const onData = term.onData((data: string) => {
       if (data === "\x03") {
         const sel = term.getSelection();
@@ -641,12 +840,38 @@ export const TerminalPane = memo(function TerminalPane({
       }
       const sid = sshIdRef.current;
       if (!sid) return;
+
+      // Predictive local echo: render safe keystrokes immediately, before
+      // the server round trip, then reconcile once real output arrives.
+      if (canSpeculate()) {
+        if (isSpeculatableInsert(data)) {
+          startOrExtendPrediction(data);
+        } else if (isSpeculatableBackspace(data)) {
+          eraseLocalPredictionChar();
+        } else {
+          // Enter, Tab, arrows, etc. — commit without erasing; the
+          // ssh-output listener's reconciliation step fixes the screen.
+          abandonPrediction();
+        }
+      } else if (predictionRef.current) {
+        abandonPrediction();
+      }
+
+      // Time single-character keystrokes only, so pastes/escape sequences
+      // don't skew the perceived-latency estimate used to auto-arm/disarm.
+      if (data.length === 1 && pendingRttSendRef.current === null) {
+        pendingRttSendRef.current = performance.now();
+      }
+
       invokeSafe("send_ssh_input", { sessionId: sid, input: data }).catch(
         () => {},
       );
     });
     let resizeTimer: ReturnType<typeof setTimeout> | null = null;
     const handleResize = () => {
+      // Reflow invalidates any tracked row/col coordinates outright — no
+      // attempt to recompute wrap geometry for an in-flight prediction.
+      abandonPrediction();
       if (!termRef.current) return; // already disposed — do not touch xterm internals
       if (!visibleRef.current) return; // skip resize work for hidden panes
       // Skip when container has no dimensions (parent is display:none)
@@ -769,8 +994,21 @@ export const TerminalPane = memo(function TerminalPane({
         "contextmenu",
         handleContextMenu,
       );
+      term.textarea?.removeEventListener(
+        "compositionstart",
+        handleCompositionStart,
+      );
+      term.textarea?.removeEventListener(
+        "compositionend",
+        handleCompositionEnd,
+      );
       const webglToDispose = webglRef.current as any;
       escapeSequenceRemainderRef.current = "";
+      predictionRef.current = null;
+      if (passwordPromptTimeoutRef.current) {
+        clearTimeout(passwordPromptTimeoutRef.current);
+        passwordPromptTimeoutRef.current = null;
+      }
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       termRef.current = null;
       fitRef.current = null;
@@ -900,6 +1138,18 @@ export const TerminalPane = memo(function TerminalPane({
       // intercept keystrokes on the new connection.
       promptRef.current = null;
       setCurrentCwd("~");
+      // Reset predictive-echo state so a reconnect never carries over stale
+      // buffer-row coordinates, RTT samples, or a suspended password state.
+      predictionRef.current = null;
+      rttEwmaRef.current = null;
+      pendingRttSendRef.current = null;
+      predictiveActiveRef.current = false;
+      passwordPromptSuspectedRef.current = false;
+      if (passwordPromptTimeoutRef.current) {
+        clearTimeout(passwordPromptTimeoutRef.current);
+        passwordPromptTimeoutRef.current = null;
+      }
+      compositionActiveRef.current = false;
       setConnecting(true);
       try {
         fitRef.current?.fit();
@@ -996,6 +1246,13 @@ export const TerminalPane = memo(function TerminalPane({
               }
               return;
             }
+
+            // Predictive local echo: fold this round trip into the RTT
+            // estimate, re-check the password-prompt heuristic, and erase
+            // any unconfirmed speculative run before the real bytes land.
+            recordRttSample();
+            checkPasswordPrompt(payload.output);
+            reconcilePrediction();
 
             // CWD updates are now handled by the OSC 7 parser registered on the
             // terminal; the SSH output stream is written directly without any
