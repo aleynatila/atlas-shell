@@ -31,9 +31,6 @@ export interface GeneralSettings {
   autoCheckUpdates?: boolean;
   updatePermissionAsked?: boolean;
   disableAlternateScreen?: boolean;
-  /** Speculative client-side local echo for high-latency SSH sessions */
-  predictiveEcho?: "off" | "auto" | "always";
-  predictiveEchoThresholdMs?: number;
 }
 
 export interface SshOutputPayload {
