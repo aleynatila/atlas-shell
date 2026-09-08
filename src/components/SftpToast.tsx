@@ -1,4 +1,4 @@
-import { Upload, X } from "lucide-react";
+import { Download, Upload, X } from "lucide-react";
 import { memo, useState } from "react";
 import type { TransferMap } from "../types";
 
@@ -47,6 +47,8 @@ export const SCPToast = memo(function SCPToast({
   const inProgress = activeTransfers.filter(([, v]) => !v.done).length;
   const errors = Object.values(transfers).filter((v) => v.error).length;
   const allDone = inProgress === 0;
+  const allDownloads =
+    total > 0 && Object.values(transfers).every((v) => v.direction === "download");
 
   const overallProgress =
     total > 0
@@ -63,18 +65,27 @@ export const SCPToast = memo(function SCPToast({
         onClick={() => setExpanded(true)}
       >
         <div className="flex items-center gap-3 bg-hx-panel border border-hx-border rounded-full px-4 py-2 shadow-lg transition-all hover:border-hx-neon/40 hover:shadow-[0_0_16px_rgba(0,229,255,0.15)]">
-          <Upload
-            size={15}
-            className={
-              allDone ? "text-hx-success" : "text-hx-neon animate-pulse"
-            }
-          />
+          {allDownloads ? (
+            <Download
+              size={15}
+              className={
+                allDone ? "text-hx-success" : "text-hx-neon animate-pulse"
+              }
+            />
+          ) : (
+            <Upload
+              size={15}
+              className={
+                allDone ? "text-hx-success" : "text-hx-neon animate-pulse"
+              }
+            />
+          )}
           <span className="text-xs font-mono text-hx-muted">
             {allDone
               ? errors > 0
                 ? `${errors} failed`
                 : `${total} done`
-              : `${inProgress}/${total} uploading`}
+              : `${inProgress}/${total} ${allDownloads ? "downloading" : "uploading"}`}
           </span>
           {!allDone && (
             <div className="w-20 h-1.5 bg-hx-border rounded overflow-hidden">
@@ -97,6 +108,11 @@ export const SCPToast = memo(function SCPToast({
             .slice(-5)
             .map(([id, t]) => (
               <div key={id} className="flex items-center gap-2 text-[10px]">
+                {t.direction === "download" ? (
+                  <Download size={10} className="text-hx-dim shrink-0" />
+                ) : (
+                  <Upload size={10} className="text-hx-dim shrink-0" />
+                )}
                 <span
                   className="text-hx-muted truncate flex-1 font-mono"
                   title={t.remotePath}
@@ -111,9 +127,9 @@ export const SCPToast = memo(function SCPToast({
                 ) : t.done ? (
                   <span
                     className="text-hx-success shrink-0 truncate max-w-32 font-mono"
-                    title={t.remotePath}
+                    title={t.direction === "download" ? t.localPath : t.remotePath}
                   >
-                    ✓ {t.remoteDir || "done"}
+                    ✓ {t.direction === "download" ? t.localPath || "done" : t.remoteDir || "done"}
                   </span>
                 ) : (
                   <span className="text-hx-neon shrink-0">
@@ -136,7 +152,11 @@ export const SCPToast = memo(function SCPToast({
           <div className="bg-hx-panel border border-hx-neon/20 rounded p-4 w-96 max-h-[70vh] flex flex-col gap-3 shadow-2xl">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <Upload size={14} className="text-hx-neon" />
+                {allDownloads ? (
+                  <Download size={14} className="text-hx-neon" />
+                ) : (
+                  <Upload size={14} className="text-hx-neon" />
+                )}
                 <span className="text-xs font-bold tracking-widest uppercase text-hx-neon">
                   SCP Transfers
                 </span>
@@ -170,7 +190,12 @@ export const SCPToast = memo(function SCPToast({
                     className="bg-hx-bg border border-hx-border rounded px-3 py-2 flex flex-col gap-1"
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <span className="text-xs text-hx-text font-mono truncate">
+                      <span className="text-xs text-hx-text font-mono truncate flex items-center gap-1.5">
+                        {t.direction === "download" ? (
+                          <Download size={11} className="text-hx-dim shrink-0" />
+                        ) : (
+                          <Upload size={11} className="text-hx-dim shrink-0" />
+                        )}
                         {t.name}
                       </span>
                       <div className="flex items-center gap-1.5 shrink-0">
@@ -189,23 +214,34 @@ export const SCPToast = memo(function SCPToast({
                       </span>
                     ) : t.done ? (
                       <div className="flex flex-col gap-0.5">
-                        {t.remoteDir && (
+                        {t.direction === "download" ? (
                           <span
-                            className="text-[10px] text-hx-dim font-mono truncate"
-                            title={t.remoteDir}
+                            className="text-[10px] text-hx-success font-mono truncate"
+                            title={t.localPath}
                           >
-                            📁 {t.remoteDir}
+                            ✓ {t.localPath || t.name}
                           </span>
+                        ) : (
+                          <>
+                            {t.remoteDir && (
+                              <span
+                                className="text-[10px] text-hx-dim font-mono truncate"
+                                title={t.remoteDir}
+                              >
+                                📁 {t.remoteDir}
+                              </span>
+                            )}
+                            <span
+                              className="text-[10px] text-hx-success font-mono truncate"
+                              title={t.remotePath}
+                            >
+                              ✓ {t.name}
+                              {!t.remoteDir && t.remotePath
+                                ? ` → ${t.remotePath}`
+                                : ""}
+                            </span>
+                          </>
                         )}
-                        <span
-                          className="text-[10px] text-hx-success font-mono truncate"
-                          title={t.remotePath}
-                        >
-                          ✓ {t.name}
-                          {!t.remoteDir && t.remotePath
-                            ? ` → ${t.remotePath}`
-                            : ""}
-                        </span>
                       </div>
                     ) : (
                       <div className="flex items-center gap-2">

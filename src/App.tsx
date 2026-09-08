@@ -313,6 +313,13 @@ function App() {
       (el as HTMLDivElement & { __disconnect?: () => void }).__disconnect?.();
   }, []);
 
+  const openFilesForActiveTab = useCallback(() => {
+    const av = activeViewRef.current;
+    if (!av) return;
+    const el = paneRefs.current[av];
+    if (el) (el as HTMLDivElement & { __openFiles?: () => void }).__openFiles?.();
+  }, []);
+
   const detachTab = useCallback((tabId: string) => {
     const tab = tabsRef.current.find((t) => t.tabId === tabId);
     if (!tab) return;
@@ -685,6 +692,7 @@ function App() {
                 scripts={scripts}
                 activeTab={activeTab}
                 paneRefs={paneRefs}
+                onOpenFiles={openFilesForActiveTab}
               />
             )}
           </div>

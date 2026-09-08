@@ -46,6 +46,21 @@ export interface SCPProgressPayload {
   error?: string;
   remote_path?: string;
   protocol?: string;
+  direction?: "upload" | "download";
+  local_path?: string;
+}
+
+export interface RemoteEntry {
+  name: string;
+  is_dir: boolean;
+  is_symlink: boolean;
+  size: number;
+  mtime: number;
+}
+
+export interface RemoteListing {
+  path: string;
+  entries: RemoteEntry[];
 }
 
 export interface DragDropPayload {
@@ -107,5 +122,7 @@ export type TransferMap = Record<
     remotePath?: string;
     remoteDir?: string;
     protocol?: string;
+    direction?: "upload" | "download";
+    localPath?: string;
   }
 >;

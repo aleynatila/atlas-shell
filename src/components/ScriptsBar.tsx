@@ -7,9 +7,10 @@ interface ScriptsBarProps {
   scripts: Script[];
   activeTab: TabPane;
   paneRefs: React.MutableRefObject<Record<string, HTMLDivElement | null>>;
+  onOpenFiles?: () => void;
 }
 
-export function ScriptsBar({ scripts, activeTab, paneRefs }: ScriptsBarProps) {
+export function ScriptsBar({ scripts, activeTab, paneRefs, onOpenFiles }: ScriptsBarProps) {
   const sessionGroup = activeTab.sessionEntry.group ?? null;
   const allGroups = [
     ...new Set(scripts.filter((s) => s.group).map((s) => s.group as string)),
@@ -62,6 +63,16 @@ export function ScriptsBar({ scripts, activeTab, paneRefs }: ScriptsBarProps) {
         <span className="text-[10px] text-hx-dim font-mono italic">
           No quick commands — add in Settings → Scripts
         </span>
+        {activeTab.connected && (
+          <button
+            onClick={onOpenFiles}
+            title="Browse remote files (SCP)"
+            className="ml-auto shrink-0 flex items-center gap-1.5 px-2 py-0.5 text-[11px] font-mono bg-hx-neon/10 text-hx-neon border border-hx-neon/20 rounded hover:bg-hx-neon/25 transition-colors whitespace-nowrap"
+          >
+            <FolderOpen size={11} />
+            Files
+          </button>
+        )}
       </div>
     );
   }
@@ -159,6 +170,18 @@ export function ScriptsBar({ scripts, activeTab, paneRefs }: ScriptsBarProps) {
         <span className="text-[10px] text-hx-dim font-mono italic">
           No scripts in "{selectedFolder}"
         </span>
+      )}
+
+      {/* Files — pinned to the far right */}
+      {activeTab.connected && (
+        <button
+          onClick={onOpenFiles}
+          title="Browse remote files (SCP)"
+          className="ml-auto shrink-0 flex items-center gap-1.5 px-2 py-0.5 text-[11px] font-mono bg-hx-neon/10 text-hx-neon border border-hx-neon/20 rounded hover:bg-hx-neon/25 transition-colors whitespace-nowrap"
+        >
+          <FolderOpen size={11} />
+          Files
+        </button>
       )}
     </div>
   );

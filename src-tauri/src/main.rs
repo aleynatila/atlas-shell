@@ -9,7 +9,7 @@ use std::{
     fs,
     io::{Read, Write},
     net::{SocketAddr, TcpStream, ToSocketAddrs},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{mpsc, Mutex},
     thread,
     time::Duration,
@@ -380,6 +380,8 @@ struct SCPProgress {
     error: Option<String>,
     remote_path: Option<String>,
     protocol: String,
+    direction: String,
+    local_path: Option<String>,
 }
 
 #[tauri::command]
@@ -403,6 +405,8 @@ fn upload_file_scp(
         error: None,
         remote_path: None,
         protocol: "scp".to_string(),
+        direction: "upload".to_string(),
+        local_path: None,
     });
     thread::spawn(move || {
         let pass = Zeroizing::new(pass);
@@ -419,10 +423,76 @@ fn upload_file_scp(
                 error: Some(e),
                 remote_path: None,
                 protocol: "error".to_string(),
+                direction: "upload".to_string(),
+                local_path: None,
             });
         }
     });
     Ok(())
+}
+
+/// Opens a TCP socket tuned for bulk file transfer: 4 MB send buffer keeps the
+/// kernel pipeline full ahead of the SSH encryption cycle; nodelay kills Nagle latency.
+fn tuned_tcp_connect(host: &str, port: u16) -> Result<TcpStream, String> {
+    let addr: SocketAddr = format!("{}:{}", host, port)
+        .to_socket_addrs()
+        .map_err(|e| e.to_string())?
+        .next()
+        .ok_or("Could not resolve host")?;
+    let domain = if addr.is_ipv6() { Domain::IPV6 } else { Domain::IPV4 };
+    let raw = Socket::new(domain, Type::STREAM, Some(Protocol::TCP)).map_err(|e| e.to_string())?;
+    raw.set_nodelay(true).ok();
+    raw.set_send_buffer_size(4 * 1024 * 1024).ok();
+    raw.set_recv_buffer_size(512 * 1024).ok();
+    raw.connect(&addr.into()).map_err(|e| e.to_string())?;
+    Ok(raw.into())
+}
+
+/// Auth chain shared by SCP/SFTP helper commands: pubkey (if a key path was given),
+/// then plain password, then keyboard-interactive (PAM / ChallengeResponseAuthentication).
+fn ssh_authenticate(sess: &mut Session, user: &str, pass: &str, key_path: Option<&str>) -> Result<(), String> {
+    let mut authed = false;
+    if let Some(kp) = key_path {
+        if sess.userauth_pubkey_file(user, None, Path::new(kp), None).is_ok() && sess.authenticated() {
+            authed = true;
+        }
+    }
+    if !authed {
+        let pwd_ok = sess.userauth_password(user, pass).is_ok() && sess.authenticated();
+        if pwd_ok {
+            authed = true;
+        } else {
+            let mut kbd = PasswordKbdAuth(pass.to_string());
+            if sess.userauth_keyboard_interactive(user, &mut kbd).is_ok() && sess.authenticated() {
+                authed = true;
+            }
+        }
+    }
+    if authed {
+        Ok(())
+    } else {
+        Err("authentication failed".into())
+    }
+}
+
+/// Resolves a leading "~" in a remote directory to an absolute path via SFTP's
+/// realpath (which the SFTP subsystem resolves relative to the login's home
+/// directory). Neither `mkdir -p '<dir>'` (single-quoted, so no shell
+/// expansion) nor scp_send's path (sent raw over the SCP protocol, never
+/// touching a shell) expand "~" themselves — left as-is, a literal "~" ends
+/// up as a directory/file named "~" instead of landing in the home dir.
+fn resolve_remote_home(sess: &Session, dir: &str) -> String {
+    if dir != "~" && !dir.starts_with("~/") {
+        return dir.to_string();
+    }
+    let Ok(sftp) = sess.sftp() else { return dir.to_string() };
+    let Ok(home) = sftp.realpath(Path::new(".")) else { return dir.to_string() };
+    let home = home.to_string_lossy().to_string();
+    if dir == "~" {
+        home
+    } else {
+        format!("{}/{}", home.trim_end_matches('/'), &dir[2..])
+    }
 }
 
 /// SCP upload
@@ -437,47 +507,18 @@ fn do_scp_upload(
     local_path: &str,
     remote_dir: &str,
 ) -> Result<(), String> {
-    // Tuned TCP socket: 4 MB send buffer keeps the kernel pipeline full
-    // ahead of the SSH encryption cycle; nodelay kills Nagle latency.
-    let addr: SocketAddr = format!("{}:{}", host, port)
-        .to_socket_addrs()
-        .map_err(|e| e.to_string())?
-        .next()
-        .ok_or("Could not resolve host")?;
-    let domain = if addr.is_ipv6() { Domain::IPV6 } else { Domain::IPV4 };
-    let raw = Socket::new(domain, Type::STREAM, Some(Protocol::TCP)).map_err(|e| e.to_string())?;
-    raw.set_nodelay(true).ok();
-    raw.set_send_buffer_size(4 * 1024 * 1024).ok();
-    raw.set_recv_buffer_size(512 * 1024).ok();
-    raw.connect(&addr.into()).map_err(|e| e.to_string())?;
-    let tcp: TcpStream = raw.into();
+    let tcp = tuned_tcp_connect(host, port)?;
 
     let mut sess = Session::new().map_err(|e| e.to_string())?;
     sess.set_tcp_stream(tcp);
     sess.handshake().map_err(|e| e.to_string())?;
+    ssh_authenticate(&mut sess, user, pass, key_path).map_err(|_| "SCP authentication failed".to_string())?;
 
-    let mut authed = false;
-    if let Some(kp) = key_path {
-        if sess.userauth_pubkey_file(user, None, Path::new(kp), None).is_ok() && sess.authenticated() {
-            authed = true;
-        }
-    }
-    if !authed {
-        let pwd_ok = sess.userauth_password(user, pass).is_ok() && sess.authenticated();
-        if pwd_ok {
-            authed = true;
-        } else {
-            // Keyboard-interactive fallback for PAM / ChallengeResponseAuthentication servers,
-            // matching the same auth chain used by start_ssh_session.
-            let mut kbd = PasswordKbdAuth(pass.to_string());
-            if sess.userauth_keyboard_interactive(user, &mut kbd).is_ok() && sess.authenticated() {
-                authed = true;
-            }
-        }
-    }
-    if !authed {
-        return Err("SCP authentication failed".into());
-    }
+    // Neither `mkdir -p '<dir>'` (quoted, so the shell won't expand it) nor
+    // scp_send's path (sent raw over the SCP protocol, never touches a shell)
+    // expand a leading "~" — passing it through literally used to create a
+    // directory/file literally named "~" instead of landing in the home dir.
+    let remote_dir = resolve_remote_home(&sess, remote_dir);
 
     use std::fs::File;
 
@@ -510,6 +551,8 @@ fn do_scp_upload(
         error: None,
         remote_path: None,
         protocol: "scp".to_string(),
+        direction: "upload".to_string(),
+        local_path: None,
     });
 
     // Use libssh2's native scp_send — handles all C0644 header + ACK handshake
@@ -546,6 +589,8 @@ fn do_scp_upload(
                     error: None,
                     remote_path: None,
                     protocol: "scp".to_string(),
+                    direction: "upload".to_string(),
+                    local_path: None,
                 });
             }
         }
@@ -569,10 +614,455 @@ fn do_scp_upload(
         error: None,
         remote_path: Some(remote_path),
         protocol: "scp".to_string(),
+        direction: "upload".to_string(),
+        local_path: None,
     });
     Ok(())
 }
 
+
+#[derive(Serialize, Clone)]
+struct RemoteEntry {
+    name: String,
+    is_dir: bool,
+    is_symlink: bool,
+    size: u64,
+    mtime: i64,
+}
+
+#[derive(Serialize, Clone)]
+struct RemoteListing {
+    path: String,
+    entries: Vec<RemoteEntry>,
+}
+
+/// List a remote directory over SFTP. Listing has no SCP equivalent (the SCP
+/// protocol has no directory-enumeration command), so this opens the SFTP
+/// subsystem on a fresh connection; the actual file transfer in
+/// `download_file_scp` below still goes over plain SCP.
+#[tauri::command]
+fn list_remote_dir(
+    host: String,
+    port: u16,
+    user: String,
+    pass: String,
+    key_path: Option<String>,
+    path: Option<String>,
+) -> Result<RemoteListing, String> {
+    let addr: SocketAddr = format!("{}:{}", host, port)
+        .to_socket_addrs()
+        .map_err(|e| e.to_string())?
+        .next()
+        .ok_or("Could not resolve host")?;
+    let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(8)).map_err(|e| e.to_string())?;
+
+    let mut sess = Session::new().map_err(|e| e.to_string())?;
+    sess.set_timeout(8_000);
+    sess.set_tcp_stream(tcp);
+    sess.handshake().map_err(|e| e.to_string())?;
+    let pass = Zeroizing::new(pass);
+    ssh_authenticate(&mut sess, &user, &*pass, key_path.as_deref())?;
+
+    let sftp = sess.sftp().map_err(|e| format!("SFTP init failed: {}", e))?;
+
+    let target = match path.filter(|p| !p.is_empty()) {
+        Some(p) => p,
+        None => sftp
+            .realpath(Path::new("."))
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| ".".to_string()),
+    };
+
+    let raw = sftp
+        .readdir(Path::new(&target))
+        .map_err(|e| format!("listing failed: {}", e))?;
+
+    let mut entries: Vec<RemoteEntry> = raw
+        .into_iter()
+        .filter_map(|(full_path, stat)| {
+            let name = full_path.file_name()?.to_string_lossy().to_string();
+            let is_symlink = stat.perm.map(|p| p & 0o170000 == 0o120000).unwrap_or(false);
+            Some(RemoteEntry {
+                name,
+                is_dir: stat.is_dir(),
+                is_symlink,
+                size: stat.size.unwrap_or(0),
+                mtime: stat.mtime.unwrap_or(0) as i64,
+            })
+        })
+        .collect();
+
+    entries.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+
+    Ok(RemoteListing { path: target, entries })
+}
+
+/// Native "choose a destination folder" dialog for SCP downloads.
+#[tauri::command]
+fn pick_download_folder() -> Result<Option<String>, String> {
+    Ok(rfd::FileDialog::new()
+        .pick_folder()
+        .map(|p| p.to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+fn download_file_scp(
+    app_handle: tauri::AppHandle,
+    transfer_id: String,
+    host: String,
+    port: u16,
+    user: String,
+    pass: String,
+    key_path: Option<String>,
+    remote_path: String,
+    local_dir: String,
+) -> Result<(), String> {
+    let _ = app_handle.emit("SCP-progress", SCPProgress {
+        id: transfer_id.clone(),
+        bytes_sent: 0,
+        total: 0,
+        done: false,
+        error: None,
+        remote_path: Some(remote_path.clone()),
+        protocol: "scp".to_string(),
+        direction: "download".to_string(),
+        local_path: None,
+    });
+    thread::spawn(move || {
+        let pass = Zeroizing::new(pass);
+        let result = do_scp_download(
+            &app_handle, &transfer_id, &host, port, &user, &*pass,
+            key_path.as_deref(), &remote_path, &local_dir,
+        );
+        if let Err(e) = result {
+            let _ = app_handle.emit("SCP-progress", SCPProgress {
+                id: transfer_id,
+                bytes_sent: 0,
+                total: 0,
+                done: true,
+                error: Some(e),
+                remote_path: Some(remote_path),
+                protocol: "error".to_string(),
+                direction: "download".to_string(),
+                local_path: None,
+            });
+        }
+    });
+    Ok(())
+}
+
+/// SCP download — mirrors `do_scp_upload` but pulls a remote file down to `local_dir`
+/// via libssh2's native `scp_recv`, which handles the SCP protocol handshake internally.
+fn do_scp_download(
+    app: &tauri::AppHandle,
+    transfer_id: &str,
+    host: &str,
+    port: u16,
+    user: &str,
+    pass: &str,
+    key_path: Option<&str>,
+    remote_path: &str,
+    local_dir: &str,
+) -> Result<(), String> {
+    let tcp = tuned_tcp_connect(host, port)?;
+
+    let mut sess = Session::new().map_err(|e| e.to_string())?;
+    sess.set_tcp_stream(tcp);
+    sess.handshake().map_err(|e| e.to_string())?;
+    ssh_authenticate(&mut sess, user, pass, key_path).map_err(|_| "SCP authentication failed".to_string())?;
+
+    use std::fs::File;
+
+    let (mut channel, stat) = sess
+        .scp_recv(Path::new(remote_path))
+        .map_err(|e| format!("SCP open failed: {}", e))?;
+    let total = stat.size();
+
+    let filename = Path::new(remote_path)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    fs::create_dir_all(local_dir).map_err(|e| e.to_string())?;
+    let local_path = Path::new(local_dir).join(&filename);
+
+    let _ = app.emit("SCP-progress", SCPProgress {
+        id: transfer_id.to_string(),
+        bytes_sent: 0,
+        total,
+        done: false,
+        error: None,
+        remote_path: Some(remote_path.to_string()),
+        protocol: "scp".to_string(),
+        direction: "download".to_string(),
+        local_path: Some(local_path.to_string_lossy().to_string()),
+    });
+
+    // 128 KB read chunks, matching the write chunk size used for uploads.
+    const READ_CHUNK: usize = 131_072;
+    const PROGRESS_INTERVAL: u64 = 524_288; // emit every 512 KB
+
+    let mut file = File::create(&local_path).map_err(|e| e.to_string())?;
+    let mut buf = [0u8; READ_CHUNK];
+    let mut received: u64 = 0;
+    let mut last_progress: u64 = 0;
+
+    // scp_recv's channel is internally limited to `total` bytes (libssh2 sets
+    // the read limit from the C0644 header), so a plain read-until-EOF loop
+    // never runs past the file into trailing SCP protocol bytes.
+    loop {
+        let n = channel.read(&mut buf).map_err(|e| format!("SCP read error: {}", e))?;
+        if n == 0 {
+            break;
+        }
+        file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+        received += n as u64;
+
+        if received - last_progress >= PROGRESS_INTERVAL || received >= total {
+            last_progress = received;
+            let _ = app.emit("SCP-progress", SCPProgress {
+                id: transfer_id.to_string(),
+                bytes_sent: received,
+                total,
+                done: false,
+                error: None,
+                remote_path: Some(remote_path.to_string()),
+                protocol: "scp".to_string(),
+                direction: "download".to_string(),
+                local_path: Some(local_path.to_string_lossy().to_string()),
+            });
+        }
+    }
+    file.flush().map_err(|e| e.to_string())?;
+    drop(file);
+
+    channel.send_eof().ok();
+    channel.wait_eof().ok();
+    channel.close().ok();
+    channel.wait_close().ok();
+
+    let _ = app.emit("SCP-progress", SCPProgress {
+        id: transfer_id.to_string(),
+        bytes_sent: total,
+        total,
+        done: true,
+        error: None,
+        remote_path: Some(remote_path.to_string()),
+        protocol: "scp".to_string(),
+        direction: "download".to_string(),
+        local_path: Some(local_path.to_string_lossy().to_string()),
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn download_folder_scp(
+    app_handle: tauri::AppHandle,
+    transfer_id: String,
+    host: String,
+    port: u16,
+    user: String,
+    pass: String,
+    key_path: Option<String>,
+    remote_path: String,
+    local_dir: String,
+) -> Result<(), String> {
+    let _ = app_handle.emit("SCP-progress", SCPProgress {
+        id: transfer_id.clone(),
+        bytes_sent: 0,
+        total: 0,
+        done: false,
+        error: None,
+        remote_path: Some(remote_path.clone()),
+        protocol: "scp".to_string(),
+        direction: "download".to_string(),
+        local_path: None,
+    });
+    thread::spawn(move || {
+        let pass = Zeroizing::new(pass);
+        let result = do_scp_download_folder(
+            &app_handle, &transfer_id, &host, port, &user, &*pass,
+            key_path.as_deref(), &remote_path, &local_dir,
+        );
+        if let Err(e) = result {
+            let _ = app_handle.emit("SCP-progress", SCPProgress {
+                id: transfer_id,
+                bytes_sent: 0,
+                total: 0,
+                done: true,
+                error: Some(e),
+                remote_path: Some(remote_path),
+                protocol: "error".to_string(),
+                direction: "download".to_string(),
+                local_path: None,
+            });
+        }
+    });
+    Ok(())
+}
+
+struct RemoteFolderFile {
+    remote: String,
+    relative: PathBuf,
+    size: u64,
+}
+
+/// Recursively walks a remote directory over SFTP, collecting every regular file
+/// (with its path relative to `remote_dir`) and every subdirectory. Symlinked
+/// directories are listed but not descended into, to avoid symlink-loop recursion.
+fn walk_remote_dir(
+    sftp: &ssh2::Sftp,
+    remote_dir: &str,
+    rel_prefix: &Path,
+    depth: u32,
+    files: &mut Vec<RemoteFolderFile>,
+    dirs: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    if depth > 40 {
+        return Ok(());
+    }
+    let entries = sftp
+        .readdir(Path::new(remote_dir))
+        .map_err(|e| format!("listing failed for {}: {}", remote_dir, e))?;
+    for (full_path, stat) in entries {
+        let Some(name) = full_path.file_name().map(|n| n.to_string_lossy().to_string()) else {
+            continue;
+        };
+        let is_symlink = stat.perm.map(|p| p & 0o170000 == 0o120000).unwrap_or(false);
+        let rel = rel_prefix.join(&name);
+        let child_remote = format!("{}/{}", remote_dir.trim_end_matches('/'), name);
+        if stat.is_dir() {
+            dirs.push(rel.clone());
+            if !is_symlink {
+                walk_remote_dir(sftp, &child_remote, &rel, depth + 1, files, dirs)?;
+            }
+        } else if stat.is_file() {
+            files.push(RemoteFolderFile {
+                remote: child_remote,
+                relative: rel,
+                size: stat.size.unwrap_or(0),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Recursive SCP folder download: SFTP is used only to discover the tree
+/// (mirrors the read-only rationale in `list_remote_dir`); every file's bytes
+/// are still pulled over plain SCP via `scp_recv`, one channel per file on the
+/// same authenticated connection.
+fn do_scp_download_folder(
+    app: &tauri::AppHandle,
+    transfer_id: &str,
+    host: &str,
+    port: u16,
+    user: &str,
+    pass: &str,
+    key_path: Option<&str>,
+    remote_path: &str,
+    local_dir: &str,
+) -> Result<(), String> {
+    let tcp = tuned_tcp_connect(host, port)?;
+    let mut sess = Session::new().map_err(|e| e.to_string())?;
+    sess.set_tcp_stream(tcp);
+    sess.handshake().map_err(|e| e.to_string())?;
+    ssh_authenticate(&mut sess, user, pass, key_path).map_err(|_| "SCP authentication failed".to_string())?;
+
+    let sftp = sess.sftp().map_err(|e| format!("SFTP init failed: {}", e))?;
+
+    let folder_name = Path::new(remote_path)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let local_root = Path::new(local_dir).join(&folder_name);
+
+    let mut files = Vec::new();
+    let mut dirs = Vec::new();
+    walk_remote_dir(&sftp, remote_path, Path::new(""), 0, &mut files, &mut dirs)?;
+
+    fs::create_dir_all(&local_root).map_err(|e| e.to_string())?;
+    for d in &dirs {
+        fs::create_dir_all(local_root.join(d)).map_err(|e| e.to_string())?;
+    }
+
+    let total: u64 = files.iter().map(|f| f.size).sum();
+    let mut sent: u64 = 0;
+    let mut last_progress: u64 = 0;
+
+    let _ = app.emit("SCP-progress", SCPProgress {
+        id: transfer_id.to_string(),
+        bytes_sent: 0,
+        total,
+        done: false,
+        error: None,
+        remote_path: Some(remote_path.to_string()),
+        protocol: "scp".to_string(),
+        direction: "download".to_string(),
+        local_path: Some(local_root.to_string_lossy().to_string()),
+    });
+
+    use std::fs::File;
+    const READ_CHUNK: usize = 131_072;
+    const PROGRESS_INTERVAL: u64 = 524_288;
+    let mut buf = [0u8; READ_CHUNK];
+
+    for f in &files {
+        let local_path = local_root.join(&f.relative);
+        if let Some(parent) = local_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let (mut channel, _stat) = sess
+            .scp_recv(Path::new(&f.remote))
+            .map_err(|e| format!("SCP open failed for {}: {}", f.remote, e))?;
+        let mut file = File::create(&local_path).map_err(|e| e.to_string())?;
+        loop {
+            let n = channel.read(&mut buf).map_err(|e| format!("SCP read error: {}", e))?;
+            if n == 0 {
+                break;
+            }
+            file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+            sent += n as u64;
+
+            if sent - last_progress >= PROGRESS_INTERVAL || sent >= total {
+                last_progress = sent;
+                let _ = app.emit("SCP-progress", SCPProgress {
+                    id: transfer_id.to_string(),
+                    bytes_sent: sent,
+                    total,
+                    done: false,
+                    error: None,
+                    remote_path: Some(remote_path.to_string()),
+                    protocol: "scp".to_string(),
+                    direction: "download".to_string(),
+                    local_path: Some(local_root.to_string_lossy().to_string()),
+                });
+            }
+        }
+        file.flush().map_err(|e| e.to_string())?;
+        channel.send_eof().ok();
+        channel.wait_eof().ok();
+        channel.close().ok();
+        channel.wait_close().ok();
+    }
+
+    let _ = app.emit("SCP-progress", SCPProgress {
+        id: transfer_id.to_string(),
+        bytes_sent: total,
+        total,
+        done: true,
+        error: None,
+        remote_path: Some(remote_path.to_string()),
+        protocol: "scp".to_string(),
+        direction: "download".to_string(),
+        local_path: Some(local_root.to_string_lossy().to_string()),
+    });
+    Ok(())
+}
 
 /// Store a password in the OS keychain (Windows Credential Manager / macOS Keychain / SecretService)
 #[tauri::command]
@@ -681,6 +1171,10 @@ fn main() {
         get_remote_cwd,
         resize_pty,
         upload_file_scp,
+        list_remote_dir,
+        pick_download_folder,
+        download_file_scp,
+        download_folder_scp,
         set_credential,
         get_credential,
         delete_credential,

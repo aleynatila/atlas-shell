@@ -24,6 +24,7 @@ import type {
     TabPane,
     TransferMap,
 } from "../types";
+import { RemoteFileBrowser } from "./RemoteFileBrowser";
 import { SCPToast } from "./SftpToast";
 
 interface TerminalPaneProps {
@@ -83,6 +84,7 @@ export const TerminalPane = memo(function TerminalPane({
   const [SCPFiles, setSCPFiles] = useState<string[]>([]);
   const [SCPRemoteDir, setSCPRemoteDir] = useState("");
   const [SCPTransfers, setSCPTransfers] = useState<TransferMap>({});
+  const [filesOpen, setFilesOpen] = useState(false);
   const [currentCwd, setCurrentCwd] = useState("~");
   const currentCwdRef = useRef("~");
   // Reconnect storm guard: track consecutive auto-reconnect attempts
@@ -349,6 +351,8 @@ export const TerminalPane = memo(function TerminalPane({
             done: p.done,
             error: p.error,
             ...(p.protocol ? { protocol: p.protocol } : {}),
+            ...(p.direction ? { direction: p.direction } : {}),
+            ...(p.local_path ? { localPath: p.local_path } : {}),
             ...(p.remote_path
               ? {
                   remotePath: p.remote_path,
@@ -1030,6 +1034,7 @@ export const TerminalPane = memo(function TerminalPane({
         __reconnect?: () => void;
         __disconnect?: () => void;
         __fit?: () => void;
+        __openFiles?: () => void;
       };
       el.__connect = connect;
       // __reconnect: stop any active session, reset terminal, show fresh
@@ -1084,6 +1089,9 @@ export const TerminalPane = memo(function TerminalPane({
           sshIdRef.current = null;
         }
         onDisconnected(pane.tabId);
+      };
+      el.__openFiles = () => {
+        if (sshIdRef.current) setFilesOpen(true);
       };
     }
   }, [connect, onDisconnected, pane.tabId]);
@@ -1263,6 +1271,25 @@ export const TerminalPane = memo(function TerminalPane({
             </div>
           </div>
         </div>
+      )}
+
+      {/* Remote file browser (SCP download) */}
+      {filesOpen && pane.sshSessionId && (
+        <RemoteFileBrowser
+          host={pane.sessionEntry.host}
+          port={pane.sessionEntry.port}
+          user={pane.sessionEntry.user}
+          pass={pane.sessionEntry.pass || password || ""}
+          keyPath={pane.sessionEntry.keyPath}
+          invokeSafe={invokeSafe}
+          onClose={() => setFilesOpen(false)}
+          onStartDownload={(id, name) =>
+            setSCPTransfers((prev) => ({
+              ...prev,
+              [id]: { name, progress: 0, done: false, direction: "download" },
+            }))
+          }
+        />
       )}
 
       {/* SCP Transfer Toast */}
