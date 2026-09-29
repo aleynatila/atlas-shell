@@ -3,7 +3,7 @@
     windows_subsystem = "windows"
 )]
 
-use ssh2::Session;
+use ssh2::{MethodType, Session};
 use std::{
     collections::HashMap,
     fs,
@@ -54,6 +54,28 @@ enum InputMessage {
 struct SshOutput {
     session: String,
     output: String,
+}
+
+/// Widen key-exchange/host-key negotiation beyond libssh2's defaults so we can still
+/// reach old network gear and ancient OpenSSH builds that only speak legacy algorithms
+/// (the same failure PuTTY works around via its Kex/Host keys panel). Modern algorithms
+/// are listed first so up-to-date servers keep negotiating strong crypto; unsupported
+/// names are silently ignored by libssh2. Must run before `handshake()`.
+fn widen_algo_prefs(sess: &Session) {
+    let _ = sess.method_pref(
+        MethodType::Kex,
+        "curve25519-sha256,curve25519-sha256@libssh2.com,\
+         ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,\
+         diffie-hellman-group18-sha512,diffie-hellman-group16-sha512,\
+         diffie-hellman-group-exchange-sha256,diffie-hellman-group14-sha256,\
+         diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1,\
+         diffie-hellman-group1-sha1",
+    );
+    let _ = sess.method_pref(
+        MethodType::HostKey,
+        "ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,\
+         rsa-sha2-512,rsa-sha2-256,ssh-rsa",
+    );
 }
 
 #[tauri::command]
@@ -109,6 +131,7 @@ fn start_ssh_session(
                     // 15s timeout for all blocking SSH operations (handshake, auth, etc.)
                     sess.set_timeout(15_000);
                     sess.set_tcp_stream(tcp);
+                    widen_algo_prefs(&sess);
                     if let Err(e) = sess.handshake() {
                         emit_err(format!("handshake failed: {}", e));
                     } else {
@@ -326,6 +349,7 @@ fn get_remote_cwd(
     let mut sess = Session::new().map_err(|e| e.to_string())?;
     sess.set_timeout(8_000);
     sess.set_tcp_stream(tcp);
+    widen_algo_prefs(&sess);
     sess.handshake().map_err(|e| e.to_string())?;
 
     let pass = Zeroizing::new(pass);
@@ -511,6 +535,7 @@ fn do_scp_upload(
 
     let mut sess = Session::new().map_err(|e| e.to_string())?;
     sess.set_tcp_stream(tcp);
+    widen_algo_prefs(&sess);
     sess.handshake().map_err(|e| e.to_string())?;
     ssh_authenticate(&mut sess, user, pass, key_path).map_err(|_| "SCP authentication failed".to_string())?;
 
@@ -659,6 +684,7 @@ fn list_remote_dir(
     let mut sess = Session::new().map_err(|e| e.to_string())?;
     sess.set_timeout(8_000);
     sess.set_tcp_stream(tcp);
+    widen_algo_prefs(&sess);
     sess.handshake().map_err(|e| e.to_string())?;
     let pass = Zeroizing::new(pass);
     ssh_authenticate(&mut sess, &user, &*pass, key_path.as_deref())?;
@@ -772,6 +798,7 @@ fn do_scp_download(
 
     let mut sess = Session::new().map_err(|e| e.to_string())?;
     sess.set_tcp_stream(tcp);
+    widen_algo_prefs(&sess);
     sess.handshake().map_err(|e| e.to_string())?;
     ssh_authenticate(&mut sess, user, pass, key_path).map_err(|_| "SCP authentication failed".to_string())?;
 
@@ -969,6 +996,7 @@ fn do_scp_download_folder(
     let tcp = tuned_tcp_connect(host, port)?;
     let mut sess = Session::new().map_err(|e| e.to_string())?;
     sess.set_tcp_stream(tcp);
+    widen_algo_prefs(&sess);
     sess.handshake().map_err(|e| e.to_string())?;
     ssh_authenticate(&mut sess, user, pass, key_path).map_err(|_| "SCP authentication failed".to_string())?;
 
