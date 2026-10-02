@@ -9,7 +9,16 @@ import {
     readText as clipboardRead,
     writeText as clipboardWrite,
 } from "@tauri-apps/plugin-clipboard-manager";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+    lazy,
+    memo,
+    Suspense,
+    useCallback,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
+} from "react";
 import { Terminal } from "xterm";
 import { FitAddon } from "xterm-addon-fit";
 import { WebglAddon } from "xterm-addon-webgl";
@@ -25,7 +34,6 @@ import type {
     TabPane,
     TransferMap,
 } from "../types";
-import { RemoteFileBrowser } from "./RemoteFileBrowser";
 import { SCPToast } from "./SftpToast";
 
 interface TerminalPaneProps {
@@ -40,6 +48,12 @@ interface TerminalPaneProps {
   fontFamily?: string;
   disableAlternateScreen?: boolean;
 }
+
+
+// Files modal (with its editor) loads on first use.
+const RemoteFileBrowser = lazy(() =>
+  import("./RemoteFileBrowser").then((m) => ({ default: m.RemoteFileBrowser })),
+);
 
 export const TerminalPane = memo(function TerminalPane({
   pane,
@@ -1346,6 +1360,7 @@ export const TerminalPane = memo(function TerminalPane({
 
       {/* Remote file browser (SCP download) */}
       {filesOpen && pane.sshSessionId && (
+        <Suspense fallback={null}>
         <RemoteFileBrowser
           host={pane.sessionEntry.host}
           port={pane.sessionEntry.port}
@@ -1367,6 +1382,7 @@ export const TerminalPane = memo(function TerminalPane({
             }))
           }
         />
+        </Suspense>
       )}
 
       {/* SCP Transfer Toast */}

@@ -148,6 +148,9 @@ fn start_ssh_session(
             });
         match tcp_result {
             Ok(tcp) => {
+                // Interactive session: send keystrokes immediately instead of letting
+                // Nagle hold small packets back (OpenSSH does the same).
+                let _ = tcp.set_nodelay(true);
                 // session creation
                 if let Ok(mut sess) = Session::new() {
                     // 15s timeout for all blocking SSH operations (handshake, auth, etc.)

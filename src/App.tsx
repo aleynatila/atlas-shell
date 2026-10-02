@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { ScriptsBar } from "./components/ScriptsBar";
 import {
+    lazy,
+    Suspense,
     useCallback,
     useDeferredValue,
     useEffect,
@@ -12,7 +14,6 @@ import {
 import "xterm/css/xterm.css";
 import { NewSession } from "./components/NewSession";
 import { Overview } from "./components/Overview";
-import { Settings } from "./components/Settings";
 import { StatusBar } from "./components/StatusBar";
 import { TabBar } from "./components/TabBar";
 import { TerminalPane } from "./components/TerminalPane";
@@ -27,6 +28,11 @@ import { useViewRouter } from "./hooks/useViewRouter";
 import "./index.css";
 import { getTheme, THEMES } from "./themes";
 import { NEON_COLORS, type SessionEntry, type TabPane } from "./types";
+
+// Settings is large and rarely opened: load its chunk on first use.
+const Settings = lazy(() =>
+  import("./components/Settings").then((m) => ({ default: m.Settings })),
+);
 
 // ── App ───────────────────────────────────────────────────────────────────────
 
@@ -460,6 +466,10 @@ function App() {
   }, []);
 
   // ── Render ──
+  // Mount Settings on first open only, then keep it (see the Settings block below).
+  const settingsEverShownRef = useRef(false);
+  if (showSettings) settingsEverShownRef.current = true;
+
   return (
     <div className="flex flex-col h-screen bg-hx-bg text-hx-text overflow-hidden">
       {/* ── Tab Bar ── */}
@@ -486,7 +496,9 @@ function App() {
 
       {/* ── Main Content ── */}
       <div className="flex-1 overflow-hidden flex flex-col">
-        {/* Settings — always mounted, hidden when not active (preserves tab state) */}
+        {/* Settings — mounted on first open, then kept mounted and hidden when not
+            active (preserves tab state). Nothing in it runs before the first open:
+            the update auto-check lives in the Updates tab, not the default tab. */}
         <div
           style={{
             display: showSettings ? "flex" : "none",
@@ -496,6 +508,8 @@ function App() {
             minHeight: 0,
           }}
         >
+          {settingsEverShownRef.current && (
+          <Suspense fallback={null}>
           <Settings
             sessions={sessions}
             credentials={credentials}
@@ -526,6 +540,8 @@ function App() {
             importTheme={importTheme}
             removeTheme={removeTheme}
           />
+          </Suspense>
+          )}
         </div>
 
         {/* New Session — conditionally mounted */}

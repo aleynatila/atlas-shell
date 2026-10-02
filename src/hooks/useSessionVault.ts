@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { planKeychainWrite } from "../lib/keychainSync";
 import type { Credential, SessionEntry } from "../types";
 
 /**
@@ -37,6 +38,10 @@ export function useSessionVault() {
     null,
   );
   const saveCredsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Last password written to (or read from) the OS keychain per entry id, so saves
+  // only touch entries whose password actually changed. Each keychain call is a
+  // Windows Credential Manager round trip.
+  const keychainPassRef = useRef<Map<string, string | undefined>>(new Map());
 
   // ── Startup: file-store load + keychain migration ──
   useEffect(() => {
@@ -73,6 +78,9 @@ export function useSessionVault() {
         }),
       );
       setCredentials(enrichedCreds);
+      enrichedCreds.forEach((c) =>
+        keychainPassRef.current.set("cred_" + c.id, c.pass),
+      );
       const credsNoPass = enrichedCreds.map(({ pass: _p, ...r }) => r);
       await invoke("write_store", {
         key: "atlas_credentials",
@@ -118,6 +126,9 @@ export function useSessionVault() {
         }),
       );
       setSessions(enrichedSessions);
+      enrichedSessions.forEach((s) => {
+        if (!s.credentialId) keychainPassRef.current.set("sess_" + s.id, s.pass);
+      });
       const sessNoPass = enrichedSessions.map(({ pass: _p, ...r }) => r);
       await invoke("write_store", {
         key: "atlas_sessions",
@@ -128,6 +139,16 @@ export function useSessionVault() {
       } catch {}
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Only touch keychain entries whose password changed (see planKeychainWrite).
+  const syncKeychain = useCallback((id: string, pass: string | undefined) => {
+    const action = planKeychainWrite(keychainPassRef.current, id, pass);
+    if (action === "set") {
+      invoke("set_credential", { id, password: pass }).catch(() => {});
+    } else if (action === "delete") {
+      invoke("delete_credential", { id }).catch(() => {});
+    }
   }, []);
 
   const saveSessions = useCallback((list: SessionEntry[]) => {
@@ -144,18 +165,9 @@ export function useSessionVault() {
     } catch {}
     invoke("write_store", { key: "atlas_sessions", value: json }).catch(() => {});
     list.forEach((s) => {
-      if (!s.credentialId) {
-        if (s.pass) {
-          invoke("set_credential", {
-            id: "sess_" + s.id,
-            password: s.pass,
-          }).catch(() => {});
-        } else {
-          invoke("delete_credential", { id: "sess_" + s.id }).catch(() => {});
-        }
-      }
+      if (!s.credentialId) syncKeychain("sess_" + s.id, s.pass);
     });
-  }, []);
+  }, [syncKeychain]);
 
   const saveCredentials = useCallback((list: Credential[]) => {
     setCredentials(list);
@@ -169,18 +181,9 @@ export function useSessionVault() {
       invoke("write_store", { key: "atlas_credentials", value: json }).catch(
         () => {},
       );
-      list.forEach((c) => {
-        if (c.pass) {
-          invoke("set_credential", {
-            id: "cred_" + c.id,
-            password: c.pass,
-          }).catch(() => {});
-        } else {
-          invoke("delete_credential", { id: "cred_" + c.id }).catch(() => {});
-        }
-      });
+      list.forEach((c) => syncKeychain("cred_" + c.id, c.pass));
     }, 400);
-  }, []);
+  }, [syncKeychain]);
 
   useEffect(
     () => () => {

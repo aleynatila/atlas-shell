@@ -2,7 +2,7 @@ import { FolderOpen, Plus, Server } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { Credential, SessionEntry, TabPane } from "../types";
 import { OverviewCardGrid } from "./OverviewCardGrid";
-import { EditSessionSidebar } from "./Settings";
+import { EditSessionSidebar } from "./EditSessionSidebar";
 
 interface OverviewProps {
   sessions: SessionEntry[];

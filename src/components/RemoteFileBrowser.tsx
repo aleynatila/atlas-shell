@@ -13,6 +13,7 @@ import {
   filterEntries,
   formatBytes,
   joinRemote,
+  normalizeRemote,
   parentOf,
 } from "../lib/remotePath";
 import type { RemoteEntry, RemoteListing } from "../types";
@@ -70,6 +71,11 @@ export const RemoteFileBrowser = memo(function RemoteFileBrowser({
   const [query, setQuery] = useState("");
   const [foldersOnly, setFoldersOnly] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
+  // A cached listing is on screen while the fresh one is being fetched.
+  const [refreshing, setRefreshing] = useState(false);
+  // Listings seen while this modal is open, so going back (.., breadcrumb) is
+  // instant. Every visit still re-fetches in the background.
+  const cacheRef = useRef<Map<string, RemoteEntry[]>>(new Map());
   const pathRef = useRef<string | null>(null);
   const startedRef = useRef(false);
   // Only the most recent load may update state (rapid clicks can overlap).
@@ -79,30 +85,54 @@ export const RemoteFileBrowser = memo(function RemoteFileBrowser({
     return { host, port, user, pass, keyPath: keyPath || null };
   }
 
+  function show(listPath: string, list: RemoteEntry[]) {
+    if (listPath !== pathRef.current) {
+      setQuery("");
+      setSelected(new Set());
+      pathRef.current = listPath;
+      onPathChange?.(listPath);
+    } else {
+      // Same folder re-listed: keep the selection for entries that still exist.
+      setSelected((prev) => {
+        const names = new Set(list.map((e) => e.name));
+        return new Set([...prev].filter((n) => names.has(n)));
+      });
+    }
+    setPath(listPath);
+    setEntries(list);
+  }
+
   function load(target: string | null) {
     const seq = ++loadSeq.current;
-    setLoading(true);
     setError(null);
+    const cached =
+      target !== null ? cacheRef.current.get(normalizeRemote(target)) : undefined;
+    if (cached) {
+      show(normalizeRemote(target!), cached);
+      setLoading(false);
+      setRefreshing(true);
+    } else {
+      setLoading(true);
+    }
     invokeSafe<RemoteListing>("list_remote_dir", {
       ...connArgs(),
       path: target,
     })
       .then((res) => {
         if (!res || seq !== loadSeq.current) return;
-        if (res.path !== pathRef.current) {
-          setQuery("");
-          pathRef.current = res.path;
-          onPathChange?.(res.path);
-        }
-        setPath(res.path);
-        setEntries(res.entries);
-        setSelected(new Set());
+        cacheRef.current.set(normalizeRemote(res.path), res.entries);
+        show(normalizeRemote(res.path), res.entries);
       })
       .catch((err) => {
-        if (seq === loadSeq.current) setError(String(err));
+        if (seq !== loadSeq.current) return;
+        if (target !== null) cacheRef.current.delete(normalizeRemote(target));
+        setError(String(err));
       })
       .finally(() => {
-        if (seq === loadSeq.current) setLoading(false);
+        if (seq === loadSeq.current) {
+          setLoading(false);
+          setRefreshing(false);
+        }
       });
   }
 
@@ -203,7 +233,7 @@ export const RemoteFileBrowser = memo(function RemoteFileBrowser({
               title="Refresh"
               className="text-hx-dim hover:text-hx-text transition-colors"
             >
-              <RefreshCw size={13} />
+              <RefreshCw size={13} className={refreshing ? "animate-spin" : ""} />
             </button>
             <button
               onClick={onClose}

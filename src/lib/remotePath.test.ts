@@ -4,6 +4,7 @@ import {
   filterEntries,
   formatBytes,
   joinRemote,
+  normalizeRemote,
   parentOf,
 } from "./remotePath";
 
@@ -22,6 +23,13 @@ describe("path helpers", () => {
     expect(parentOf("/var/log")).toBe("/var");
     expect(parentOf("/var")).toBe("/");
     expect(parentOf("/")).toBe("/");
+  });
+
+  it("normalizes cache keys", () => {
+    expect(normalizeRemote("/var/log/")).toBe("/var/log");
+    expect(normalizeRemote("/var/log")).toBe("/var/log");
+    expect(normalizeRemote("/")).toBe("/");
+    expect(normalizeRemote("//")).toBe("/");
   });
 
   it("formats sizes", () => {

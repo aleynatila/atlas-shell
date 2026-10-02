@@ -16,6 +16,12 @@ export function joinRemote(dir: string, name: string): string {
   return dir === "/" ? `/${name}` : `${dir.replace(/\/+$/, "")}/${name}`;
 }
 
+/** "/var/log/" -> "/var/log"; "/" stays "/". Used as a cache key. */
+export function normalizeRemote(path: string): string {
+  const trimmed = path.replace(/\/+$/, "");
+  return trimmed === "" ? "/" : trimmed;
+}
+
 export function parentOf(path: string): string {
   const trimmed = path.replace(/\/+$/, "");
   const idx = trimmed.lastIndexOf("/");
