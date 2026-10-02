@@ -16,7 +16,8 @@
     "version": "node scripts/version-sync.mjs",
     "release:patch": "npm version patch && git push origin master --tags",
     "release:minor": "npm version minor && git push origin master --tags",
-    "release:major": "npm version major && git push origin master --tags"
+    "release:major": "npm version major && git push origin master --tags",
+    "test": "vitest run"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.5.0",
@@ -49,6 +50,7 @@
     "sharp": "^0.34.5",
     "tailwindcss": "^4.2.2",
     "typescript": "5.4",
-    "vite": "^4.4.0"
+    "vite": "^4.4.0",
+    "vitest": "^0.34.6"
   }
 }

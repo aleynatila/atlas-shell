@@ -20,6 +20,7 @@ import type {
     DragDropPayload,
     DragOverPayload,
     SCPProgressPayload,
+    SshDiagnosis,
     SshOutputPayload,
     TabPane,
     TransferMap,
@@ -96,6 +97,8 @@ export const TerminalPane = memo(function TerminalPane({
   // Set when the backend emits "authentication failed" so [disconnected]
   // handler shows prompt instead of auto-reconnecting with bad creds.
   const authFailedRef = useRef(false);
+  // Diagnose a failed handshake once per connect attempt, not on every auto-reconnect.
+  const diagRanRef = useRef(false);
   const MAX_AUTO_RECONNECTS = 3;
   const RECONNECT_DELAY_MS = 3000;
   const appVersionRef = useRef("");
@@ -238,6 +241,24 @@ export const TerminalPane = memo(function TerminalPane({
     currentCwdRef.current = currentCwd;
   }, [currentCwd]);
 
+  // Files modal state mirrored into refs: the drag-drop listener below is
+  // registered once per visibility change and would otherwise see stale values.
+  const filesOpenRef = useRef(false);
+  const filesPathRef = useRef<string | null>(null);
+  const [filesPath, setFilesPath] = useState<string | null>(null);
+  const [filesRefresh, setFilesRefresh] = useState(0);
+  const uploadFilesRef = useRef<(paths: string[], remoteDir: string) => void>(
+    () => {},
+  );
+  const filesUploadIdsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    filesOpenRef.current = filesOpen;
+    if (!filesOpen) {
+      filesPathRef.current = null;
+      setFilesPath(null);
+    }
+  }, [filesOpen]);
+
   // Helper: check if a {x, y} point (screen coords from Tauri v2 drag events)
   // falls within this pane's bounding rect.
   function isDropInsidePane(x: number, y: number): boolean {
@@ -270,6 +291,16 @@ export const TerminalPane = memo(function TerminalPane({
         if (pos && !isDropInsidePane(pos.x, pos.y)) return;
 
         setDragOver(false);
+        // With the Files modal open, upload straight into the folder it shows.
+        if (
+          filesOpenRef.current &&
+          filesPathRef.current &&
+          Array.isArray(paths) &&
+          paths.length > 0
+        ) {
+          uploadFilesRef.current(paths, filesPathRef.current);
+          return;
+        }
         if (Array.isArray(paths) && paths.length > 0) {
           setSCPFiles(paths);
 
@@ -335,6 +366,10 @@ export const TerminalPane = memo(function TerminalPane({
 
     listenSafe("SCP-progress", (e) => {
       const p = e.payload as SCPProgressPayload;
+      // Re-list the Files modal once an upload that was dropped into it finishes.
+      if (p.done && filesUploadIdsRef.current.delete(p.id)) {
+        setFilesRefresh((n) => n + 1);
+      }
       setSCPTransfers((prev) => {
         // Only handle progress for transfers THIS pane started.
         // app.emit_all() broadcasts to all webviews; ignoring unknown IDs
@@ -377,11 +412,17 @@ export const TerminalPane = memo(function TerminalPane({
   }, [isTauriRuntime, visible]);
 
   function startSCPUpload() {
+    uploadFiles(SCPFiles, SCPRemoteDir || currentCwdRef.current);
+    setSCPFiles([]);
+  }
+
+  function uploadFiles(paths: string[], remoteDir: string, fromFiles = false) {
     const transfers: TransferMap = {};
-    SCPFiles.forEach((fp) => {
+    paths.forEach((fp) => {
       const id = crypto.randomUUID();
       const name = fp.split(/[\\/]/).pop() || fp;
       transfers[id] = { name, progress: 0, done: false };
+      if (fromFiles) filesUploadIdsRef.current.add(id);
       invokeSafe("upload_file_scp", {
         transferId: id,
         host: pane.sessionEntry.host,
@@ -390,7 +431,7 @@ export const TerminalPane = memo(function TerminalPane({
         pass: pane.sessionEntry.pass || password || "",
         keyPath: pane.sessionEntry.keyPath || null,
         localPath: fp,
-        remoteDir: SCPRemoteDir || currentCwdRef.current,
+        remoteDir,
       }).catch((err) => {
         setSCPTransfers((prev) => {
           const existing = prev[id];
@@ -403,8 +444,9 @@ export const TerminalPane = memo(function TerminalPane({
       });
     });
     setSCPTransfers((prev) => ({ ...prev, ...transfers }));
-    setSCPFiles([]);
   }
+  uploadFilesRef.current = (paths, remoteDir) =>
+    uploadFiles(paths, remoteDir, true);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -931,6 +973,7 @@ export const TerminalPane = memo(function TerminalPane({
           sshIdRef.current = sshId;
           setConnecting(false);
           reconnectCountRef.current = 0; // reset on successful connect
+          diagRanRef.current = false;
           onConnected(pane.tabId, sshId);
           listenSafe(`ssh-output-${sshId}`, (event) => {
             // Discard events from a session that is no longer current.
@@ -944,6 +987,26 @@ export const TerminalPane = memo(function TerminalPane({
             // instead of retrying with the same bad credentials.
             if (payload.output.includes("authentication failed")) {
               authFailedRef.current = true;
+            }
+
+            // A failed handshake only says "Unable to exchange encryption keys";
+            // ask the server what it offers and print why nothing matched.
+            if (payload.output.includes("handshake failed") && !diagRanRef.current) {
+              diagRanRef.current = true;
+              invokeSafe<SshDiagnosis>("diagnose_ssh", {
+                host: pane.sessionEntry.host,
+                port: pane.sessionEntry.port,
+              })
+                .then((d) => {
+                  if (!d) return;
+                  const text = d.problem
+                    ? d.problem
+                    : "The server's algorithms overlap with Atlas's, so the failure is likely a server-side restriction or a cipher/MAC ordering issue.";
+                  term.write(
+                    `\r\n\x1b[33m[diagnosis] ${d.banner}\x1b[0m\r\n\x1b[33m${text}\x1b[0m\r\n`,
+                  );
+                })
+                .catch(() => {});
             }
 
             // Detect session termination signals from the Rust backend.
@@ -1221,9 +1284,15 @@ export const TerminalPane = memo(function TerminalPane({
 
       {/* Drag-over overlay */}
       {dragOver && (
-        <div className="absolute inset-0 bg-hx-neon/10 border-2 border-dashed border-hx-neon flex items-center justify-center z-20 pointer-events-none">
-          <div className="text-hx-neon text-sm font-mono tracking-widest">
-            DROP FILES TO UPLOAD VIA SCP
+        <div
+          className={`absolute inset-0 bg-hx-neon/10 border-2 border-dashed border-hx-neon flex items-center justify-center pointer-events-none ${
+            filesOpen && filesPath ? "z-[36]" : "z-20"
+          }`}
+        >
+          <div className="text-hx-neon text-sm font-mono tracking-widest text-center px-4 break-all">
+            {filesOpen && filesPath
+              ? `DROP TO UPLOAD TO ${filesPath}`
+              : "DROP FILES TO UPLOAD VIA SCP"}
           </div>
         </div>
       )}
@@ -1281,6 +1350,12 @@ export const TerminalPane = memo(function TerminalPane({
           user={pane.sessionEntry.user}
           pass={pane.sessionEntry.pass || password || ""}
           keyPath={pane.sessionEntry.keyPath}
+          cwd={currentCwd}
+          refreshKey={filesRefresh}
+          onPathChange={(p) => {
+            filesPathRef.current = p;
+            setFilesPath(p);
+          }}
           invokeSafe={invokeSafe}
           onClose={() => setFilesOpen(false)}
           onStartDownload={(id, name) =>

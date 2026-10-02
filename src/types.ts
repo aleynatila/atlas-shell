@@ -58,6 +58,24 @@ export interface RemoteEntry {
   mtime: number;
 }
 
+export interface AlgoCategory {
+  name: string;
+  server: string[];
+  client: string[];
+  common: string[];
+}
+
+export interface SshDiagnosis {
+  banner: string;
+  categories: AlgoCategory[];
+  problem?: string | null;
+}
+
+export interface RemoteFileContent {
+  content: string;
+  size: number;
+}
+
 export interface RemoteListing {
   path: string;
   entries: RemoteEntry[];

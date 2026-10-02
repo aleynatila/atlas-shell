@@ -29,6 +29,18 @@ jobs:
           workspaces: "src-tauri -> target"
           shared-key: "tauri-${{ runner.os }}"
 
+      # libssh2 is built against a vendored OpenSSL (curve25519/ecdh KEX needed by
+      # modern OpenSSH servers). OpenSSL's Configure needs a full Perl, so make
+      # sure Strawberry Perl wins over Git's stripped-down perl on PATH.
+      - name: Ensure Strawberry Perl
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "C:\Strawberry\perl\bin\perl.exe")) {
+            choco install strawberryperl -y --no-progress
+          }
+          "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "C:\Strawberry\c\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
       - name: Install frontend dependencies
         run: npm ci
 

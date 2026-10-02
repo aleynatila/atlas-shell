@@ -3,6 +3,9 @@
     windows_subsystem = "windows"
 )]
 
+mod remote_file;
+mod ssh_diag;
+
 use ssh2::{MethodType, Session};
 use std::{
     collections::HashMap,
@@ -62,20 +65,39 @@ struct SshOutput {
 /// are listed first so up-to-date servers keep negotiating strong crypto; unsupported
 /// names are silently ignored by libssh2. Must run before `handshake()`.
 fn widen_algo_prefs(sess: &Session) {
-    let _ = sess.method_pref(
-        MethodType::Kex,
-        "curve25519-sha256,curve25519-sha256@libssh2.com,\
-         ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,\
-         diffie-hellman-group18-sha512,diffie-hellman-group16-sha512,\
-         diffie-hellman-group-exchange-sha256,diffie-hellman-group14-sha256,\
-         diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1,\
-         diffie-hellman-group1-sha1",
-    );
-    let _ = sess.method_pref(
-        MethodType::HostKey,
-        "ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,\
-         rsa-sha2-512,rsa-sha2-256,ssh-rsa",
-    );
+    const HOST_KEY: &[&str] = &[
+        "ssh-ed25519",
+        "ecdsa-sha2-nistp256",
+        "ecdsa-sha2-nistp384",
+        "ecdsa-sha2-nistp521",
+        "rsa-sha2-512",
+        "rsa-sha2-256",
+        "ssh-rsa",
+    ];
+    // KEX: every algorithm this libssh2 build supports (incl. legacy DH groups), in
+    // libssh2's own order. Reordering it breaks negotiation with modern OpenSSH
+    // ("Unable to exchange encryption keys"), so keep the order as reported.
+    if let Ok(kex) = sess.supported_algs(MethodType::Kex) {
+        if !kex.is_empty() {
+            let _ = sess.method_pref(MethodType::Kex, &kex.join(","));
+        }
+    }
+    // Host keys: preferred order first, then anything else supported, so the list
+    // is never narrower than libssh2's defaults.
+    let supported = sess.supported_algs(MethodType::HostKey).unwrap_or_default();
+    let mut list: Vec<&str> = HOST_KEY
+        .iter()
+        .copied()
+        .filter(|a| supported.contains(a))
+        .collect();
+    for a in supported {
+        if !list.contains(&a) {
+            list.push(a);
+        }
+    }
+    if !list.is_empty() {
+        let _ = sess.method_pref(MethodType::HostKey, &list.join(","));
+    }
 }
 
 #[tauri::command]
@@ -183,6 +205,16 @@ fn start_ssh_session(
                                     // Accumulates one batch of output; taken (not cloned) into each emit.
                                     let mut combined = String::new();
                                     let mut keepalive_timer = std::time::Instant::now();
+                                    // One-time cwd hook (OSC 7) so the file browser can open where the
+                                    // user `cd`'d to. 0 = waiting for the first prompt, 1 = sent and
+                                    // hiding its echo, 2 = done. Sent only after the login banner has
+                                    // gone quiet; its echo is held back until the first OSC 7 arrives
+                                    // (or a timeout, so non-bash/zsh shells still show what happened).
+                                    let mut hook_state: u8 = 0;
+                                    let hook_started = std::time::Instant::now();
+                                    let mut hook_last_data: Option<std::time::Instant> = None;
+                                    let mut hook_sent_at = std::time::Instant::now();
+                                    let mut hook_held = String::new();
                                     // Adaptive idle counter: counts consecutive ticks without any
                                     // I/O. Reset on output, input, or any work so an active session
                                     // stays snappy; ramps up when truly idle so the loop sleeps in
@@ -215,6 +247,21 @@ fn start_ssh_session(
                                                 _ => break,
                                             }
                                         }
+                                        if hook_state == 1 {
+                                            hook_held.push_str(&combined);
+                                            combined.clear();
+                                            if let Some(i) = hook_held.find("\x1b]7;") {
+                                                // Drop the hook's echo; clear the row so the next
+                                                // prompt replaces the one the echo was typed after.
+                                                let rest = hook_held.split_off(i);
+                                                hook_held.clear();
+                                                combined = format!("\r\x1b[2K{rest}");
+                                                hook_state = 2;
+                                            } else if hook_sent_at.elapsed().as_secs() >= 4 {
+                                                combined = std::mem::take(&mut hook_held);
+                                                hook_state = 2;
+                                            }
+                                        }
                                         if !combined.is_empty() {
                                             // take() moves the buffer into the event without copying;
                                             // combined is replaced with an empty String (no alloc here).
@@ -245,6 +292,29 @@ fn start_ssh_session(
                                                     break;
                                                 }
                                                 Err(mpsc::TryRecvError::Empty) => break,
+                                            }
+                                        }
+                                        if hook_state == 0 {
+                                            if got_data {
+                                                hook_last_data = Some(std::time::Instant::now());
+                                            }
+                                            let quiet = hook_last_data
+                                                .map_or(false, |t| t.elapsed().as_millis() >= 250);
+                                            if quiet || hook_started.elapsed().as_secs() >= 3 {
+                                                // Leading space keeps it out of history; shells other
+                                                // than bash/zsh just ignore it.
+                                                let _ = channel.write_all(
+                                                    concat!(
+                                                        " __atlas_cwd(){ printf '\\033]7;file://%s%s\\007' \"$HOSTNAME\" \"$PWD\"; }; ",
+                                                        "[ -n \"$BASH_VERSION\" ] && PROMPT_COMMAND=\"__atlas_cwd${PROMPT_COMMAND:+;$PROMPT_COMMAND}\"; ",
+                                                        "[ -n \"$ZSH_VERSION\" ] && precmd_functions+=(__atlas_cwd); ",
+                                                        "__atlas_cwd
+"
+                                                    )
+                                                    .as_bytes(),
+                                                );
+                                                hook_state = 1;
+                                                hook_sent_at = std::time::Instant::now();
                                             }
                                         }
                                         let _ = channel.flush();
@@ -420,6 +490,9 @@ fn upload_file_scp(
     local_path: String,
     remote_dir: String,
 ) -> Result<(), String> {
+    if Path::new(&local_path).is_dir() {
+        return Err("Folders can't be uploaded yet - drop individual files".into());
+    }
     // Emit immediately so the UI registers the transfer before the thread even starts
     let _ = app_handle.emit("SCP-progress", SCPProgress {
         id: transfer_id.clone(),
@@ -1211,6 +1284,9 @@ fn main() {
         debug_log,
         export_to_file,
         import_from_file,
+        ssh_diag::diagnose_ssh,
+        remote_file::read_remote_file,
+        remote_file::write_remote_file,
     ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
