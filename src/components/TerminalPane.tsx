@@ -134,6 +134,8 @@ export const TerminalPane = memo(function TerminalPane({
   }
 
   function debugLog(message: string) {
+    // Chatty (fires on every buffer change); each call is also an IPC round trip.
+    if (!import.meta.env.DEV) return;
     const line = `[TerminalPane] ${pane.tabId}: ${message}`;
     console.log(line);
     invokeSafe("debug_log", { message: line }).catch(() => {});
