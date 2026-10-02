@@ -418,6 +418,24 @@ function App() {
     return paneRefCallbacks.current[id];
   }, []);
 
+  // Split panes get a derived pane object. Reuse it while the source tab object
+  // is unchanged, otherwise every App render handed TerminalPane a new `pane`
+  // and defeated its memo (and re-created its pane-dependent callbacks).
+  const splitPaneCache = useRef(new WeakMap<TabPane, TabPane>());
+  const getSplitPane = useCallback((tab: TabPane) => {
+    let pane = splitPaneCache.current.get(tab);
+    if (!pane) {
+      pane = {
+        ...tab,
+        tabId: `split-${tab.tabId}`,
+        sshSessionId: null,
+        connected: false,
+      };
+      splitPaneCache.current.set(tab, pane);
+    }
+    return pane;
+  }, []);
+
   const tabPasswords = useMemo(() => {
     const map: Record<string, string> = {};
     for (const tab of tabs) {
@@ -678,12 +696,7 @@ function App() {
                       }}
                     >
                       <TerminalPane
-                        pane={{
-                          ...tab,
-                          tabId: `split-${tab.tabId}`,
-                          sshSessionId: null,
-                          connected: false,
-                        }}
+                        pane={getSplitPane(tab)}
                         password={tabPasswords[tab.tabId] ?? ""}
                         onConnected={handleConnected}
                         onDisconnected={handleDisconnected}
