@@ -187,7 +187,7 @@ fn fetch_server_kexinit(host: &str, port: u16) -> Result<(String, ServerKexInit)
 }
 
 /// Compare the algorithms a server offers with the ones this build of Atlas supports.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn diagnose_ssh(host: String, port: u16) -> Result<SshDiagnosis, String> {
     let (banner, server) = fetch_server_kexinit(&host, port)?;
     Ok(build_diagnosis(&banner, &server, &client_algos()?))

@@ -117,7 +117,7 @@ fn write_file(sftp: &Sftp, path: &str, content: &str) -> Result<(), String> {
     result
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_remote_file(
     host: String,
     port: u16,
@@ -130,7 +130,7 @@ pub fn read_remote_file(
     read_file(&sftp, &path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn write_remote_file(
     host: String,
     port: u16,

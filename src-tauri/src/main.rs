@@ -692,7 +692,7 @@ struct RemoteListing {
 /// protocol has no directory-enumeration command), so this opens the SFTP
 /// subsystem on a fresh connection; the actual file transfer in
 /// `download_file_scp` below still goes over plain SCP.
-#[tauri::command]
+#[tauri::command(async)]
 fn list_remote_dir(
     host: String,
     port: u16,
@@ -1120,7 +1120,7 @@ fn do_scp_download_folder(
 }
 
 /// Store a password in the OS keychain (Windows Credential Manager / macOS Keychain / SecretService)
-#[tauri::command]
+#[tauri::command(async)]
 fn set_credential(id: String, password: String) -> Result<(), String> {
     let password = Zeroizing::new(password);
     Entry::new("atlas", &id)
@@ -1130,7 +1130,7 @@ fn set_credential(id: String, password: String) -> Result<(), String> {
 }
 
 /// Retrieve a password from the OS keychain. Returns None if not found.
-#[tauri::command]
+#[tauri::command(async)]
 fn get_credential(id: String) -> Result<Option<String>, String> {
     let entry = Entry::new("atlas", &id).map_err(|e| e.to_string())?;
     match entry.get_password() {
@@ -1141,7 +1141,7 @@ fn get_credential(id: String) -> Result<Option<String>, String> {
 }
 
 /// Delete a password from the OS keychain. Silently succeeds if not found.
-#[tauri::command]
+#[tauri::command(async)]
 fn delete_credential(id: String) -> Result<(), String> {
     let entry = Entry::new("atlas", &id).map_err(|e| e.to_string())?;
     match entry.delete_password() {
@@ -1154,7 +1154,7 @@ fn delete_credential(id: String) -> Result<(), String> {
 /// Read a value from the persistent app-data store.
 /// Files live in {app_data_dir}/store/{key} and survive reinstalls, WebView2
 /// profile wipes, and origin changes (tauri:// vs http://localhost).
-#[tauri::command]
+#[tauri::command(async)]
 fn read_store(app_handle: tauri::AppHandle, key: String) -> Result<Option<String>, String> {
     let data_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
     let path = data_dir.join("store").join(&key);
@@ -1166,7 +1166,7 @@ fn read_store(app_handle: tauri::AppHandle, key: String) -> Result<Option<String
 }
 
 /// Write a value to the persistent app-data store.
-#[tauri::command]
+#[tauri::command(async)]
 fn write_store(app_handle: tauri::AppHandle, key: String, value: String) -> Result<(), String> {
     let data_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
     let store_dir = data_dir.join("store");
