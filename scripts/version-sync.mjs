@@ -29,8 +29,7 @@ await writeFile("src-tauri/Cargo.toml", cargoToml, "utf8");
 
 // ── Cargo.lock (only the atlas-tauri package entry) ─────────────────────────
 let cargoLock = await readFile("src-tauri/Cargo.lock", "utf8");
-const lockEntry = /(name = "atlas-tauri"?
-version = ")[^"]*(")/;
+const lockEntry = /(name = "atlas-tauri"\r?\nversion = ")[^"]*(")/;
 if (!lockEntry.test(cargoLock)) {
   throw new Error("atlas-tauri entry not found in src-tauri/Cargo.lock");
 }
