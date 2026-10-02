@@ -15,6 +15,7 @@ import {
     Suspense,
     useCallback,
     useEffect,
+    useLayoutEffect,
     useMemo,
     useRef,
     useState,
@@ -88,6 +89,8 @@ export const TerminalPane = memo(function TerminalPane({
   visibleRef.current = visible;
   // Tracks whether a font update is pending for when this pane becomes visible
   const pendingFontUpdateRef = useRef(false);
+  // Container size at the last fit() done when the pane was shown.
+  const lastShownSizeRef = useRef("");
   const disableAlternateScreenRef = useRef(disableAlternateScreen ?? false);
   disableAlternateScreenRef.current = disableAlternateScreen ?? false;
   const passwordRef = useRef(password);
@@ -286,16 +289,18 @@ export const TerminalPane = memo(function TerminalPane({
     );
   }
 
-  // Listen to Tauri v2 file-drop events only when this pane is visible.
+  // Tauri v2 file-drop events. Registered once per pane (re-registering on every
+  // tab switch cost 6 IPC round trips per switch); hidden panes ignore them.
   // v2 drag-drop payload includes { paths, position } so we can route drops
   // to the correct split-pane instead of showing the dialog on all panes.
   useEffect(() => {
-    if (!visible || !isTauriRuntime) return;
+    if (!isTauriRuntime) return;
     const unlisteners: Array<() => void> = [];
     let mounted = true;
 
     Promise.all([
       listenSafe("tauri://drag-drop", (e) => {
+        if (!visibleRef.current) return;
         const payload = e.payload as DragDropPayload;
         const paths =
           payload.paths ??
@@ -349,6 +354,7 @@ export const TerminalPane = memo(function TerminalPane({
         }
       }),
       listenSafe("tauri://drag-over", (e) => {
+        if (!visibleRef.current) return;
         if ((window as any).__tabDragging) return;
         const payload = e.payload as DragOverPayload;
         const pos = payload?.position;
@@ -372,11 +378,19 @@ export const TerminalPane = memo(function TerminalPane({
       mounted = false;
       unlisteners.forEach((u) => u());
     };
-  }, [isTauriRuntime, visible]);
+  }, [isTauriRuntime]);
 
-  // Listen to SCP-progress events
+  // A drag that was hovering this pane when it got hidden must not leave the
+  // overlay up when the pane is shown again.
   useEffect(() => {
-    if (!visible || !isTauriRuntime) return;
+    if (!visible) setDragOver(false);
+  }, [visible]);
+
+  // SCP-progress events. Registered once per pane so transfers keep updating
+  // (and finish) while the tab is in the background; previously a transfer
+  // that completed on a hidden tab never received its "done" event.
+  useEffect(() => {
+    if (!isTauriRuntime) return;
     const unlisteners: Array<() => void> = [];
     let mounted = true;
 
@@ -425,7 +439,7 @@ export const TerminalPane = memo(function TerminalPane({
       mounted = false;
       unlisteners.forEach((u) => u());
     };
-  }, [isTauriRuntime, visible]);
+  }, [isTauriRuntime]);
 
   function startSCPUpload() {
     uploadFiles(SCPFiles, SCPRemoteDir || currentCwdRef.current);
@@ -884,51 +898,69 @@ export const TerminalPane = memo(function TerminalPane({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
+  // Runs right after React shows the pane (same commit, before the browser
+  // paints), so the first visible frame already has the right size and content.
+  // It used to wait two animation frames, which showed the pane for a frame or
+  // two before it was fitted and redrawn. If the terminal or its container is
+  // not ready yet, fall back to waiting two frames as before.
+  useLayoutEffect(() => {
     if (visible) {
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          const term = termRef.current;
-          debugLog(
-            `became visible - webglLost=${webglLostRef.current} pendingFont=${pendingFontUpdateRef.current} hasTerm=${!!term}`,
-          );
-          try {
-            // Recover WebGL context if it was lost while the tab was hidden
-            if (webglLostRef.current && term && containerRef.current) {
-              debugLog("attempting WebGL context recovery");
-              try {
-                const webgl = new WebglAddon();
-                webgl.onContextLoss(() => {
-                  warnLog("WebGL context LOST (recovery addon)");
-                  webglRef.current = null;
-                  webglLostRef.current = true;
-                });
-                term.loadAddon(webgl);
-                webglRef.current = webgl;
-                webglLostRef.current = false;
-                debugLog("WebGL context recovered");
-              } catch (e) {
-                warnLog("WebGL recovery failed, staying on canvas", e);
-                webglLostRef.current = false;
-              }
+      const showPane = () => {
+        const term = termRef.current;
+        debugLog(
+          `became visible - webglLost=${webglLostRef.current} pendingFont=${pendingFontUpdateRef.current} hasTerm=${!!term}`,
+        );
+        try {
+          // Recover WebGL context if it was lost while the tab was hidden
+          if (webglLostRef.current && term && containerRef.current) {
+            debugLog("attempting WebGL context recovery");
+            try {
+              const webgl = new WebglAddon();
+              webgl.onContextLoss(() => {
+                warnLog("WebGL context LOST (recovery addon)");
+                webglRef.current = null;
+                webglLostRef.current = true;
+              });
+              term.loadAddon(webgl);
+              webglRef.current = webgl;
+              webglLostRef.current = false;
+              debugLog("WebGL context recovered");
+            } catch (e) {
+              warnLog("WebGL recovery failed, staying on canvas", e);
+              webglLostRef.current = false;
             }
-
-            // Apply any deferred font update first so fit() uses the correct metrics
-            if (pendingFontUpdateRef.current) {
-              pendingFontUpdateRef.current = false;
-              debugLog("visible - applying deferred font refresh");
-              applyFontRefresh();
-            } else {
-              fitRef.current?.fit();
-              // Force a full re-render in case the canvas was blank
-              term?.refresh(0, (term?.rows ?? 1) - 1);
-            }
-          } catch (err) {
-            warnLog("visible recovery error", err);
           }
-          term?.focus();
-        });
-      });
+
+          // Apply any deferred font update first so fit() uses the correct metrics
+          if (pendingFontUpdateRef.current) {
+            pendingFontUpdateRef.current = false;
+            debugLog("visible - applying deferred font refresh");
+            applyFontRefresh();
+          } else {
+            // fit() re-measures via getComputedStyle; skip it when the
+            // container is the size we last fitted to on show.
+            const el = containerRef.current;
+            const size = el ? `${el.clientWidth}x${el.clientHeight}` : "";
+            if (size !== lastShownSizeRef.current) {
+              fitRef.current?.fit();
+              lastShownSizeRef.current = size;
+            }
+            // Force a full re-render in case the canvas was blank
+            term?.refresh(0, (term?.rows ?? 1) - 1);
+          }
+        } catch (err) {
+          warnLog("visible recovery error", err);
+        }
+        term?.focus();
+      };
+      // On mount the terminal is created by a later (passive) effect, so it
+      // does not exist yet here; that case also takes the two-frame path.
+      const el = containerRef.current;
+      if (termRef.current && el && el.clientWidth > 0 && el.clientHeight > 0) {
+        showPane();
+      } else {
+        requestAnimationFrame(() => requestAnimationFrame(showPane));
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
