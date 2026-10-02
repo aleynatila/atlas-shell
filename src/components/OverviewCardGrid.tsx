@@ -34,7 +34,7 @@ export const OverviewCardGrid = memo(
         {overviewSessions.map((s) => {
           const connectedTab = connectedTabsBySessionId.get(s.id);
           return (
-            <div key={s.id}>
+            <div key={s.id} className="hx-card-cell">
               <SessionCard
                 session={s}
                 isOpen={!!connectedTab}

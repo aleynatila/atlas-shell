@@ -99,6 +99,15 @@ body {
 
 /* ── Angular clip shapes ──────────────────────────── */
 
+/* Overview grid cell: let the browser skip layout/paint of off-screen cards.
+   With hundreds of saved sessions, re-showing Overview laid out every card
+   (~200-300 ms for 560 cards); now only the visible ones. 207px is the card's
+   rendered height; "auto" remembers each card's real size once rendered. */
+.hx-card-cell {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 207px;
+}
+
 .hx-card {
   position: relative;
   clip-path: polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 0 100%);
