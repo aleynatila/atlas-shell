@@ -215,6 +215,9 @@ fn start_ssh_session(
                                     let mut hook_last_data: Option<std::time::Instant> = None;
                                     let mut hook_sent_at = std::time::Instant::now();
                                     let mut hook_held = String::new();
+                                    // Input that woke the idle wait below; handled at the top of the
+                                    // next drain.
+                                    let mut woken_by: Option<InputMessage> = None;
                                     // Adaptive idle counter: counts consecutive ticks without any
                                     // I/O. Reset on output, input, or any work so an active session
                                     // stays snappy; ramps up when truly idle so the loop sleeps in
@@ -278,7 +281,11 @@ fn start_ssh_session(
                                         let mut got_input = false;
                                         sess.set_blocking(true);
                                         loop {
-                                            match rx.try_recv() {
+                                            let next = match woken_by.take() {
+                                                Some(msg) => Ok(msg),
+                                                None => rx.try_recv(),
+                                            };
+                                            match next {
                                                 Ok(InputMessage::Data(d)) => {
                                                     got_input = true;
                                                     let _ = channel.write_all(&d);
@@ -352,7 +359,14 @@ fn start_ssh_session(
                                             } else {
                                                 100  // long idle: kernel-sleep mostly
                                             };
-                                            thread::sleep(Duration::from_millis(sleep_ms));
+                                            // Wait on the input channel instead of sleeping so a
+                                            // keypress after a long idle is sent at once (a plain
+                                            // sleep added up to 100 ms to the first keystroke).
+                                            // Timeout/disconnect fall through; the drain above
+                                            // detects a closed channel on the next turn.
+                                            if let Ok(msg) = rx.recv_timeout(Duration::from_millis(sleep_ms)) {
+                                                woken_by = Some(msg);
+                                            }
                                         }
                                     }
                                 }
