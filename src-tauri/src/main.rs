@@ -395,66 +395,6 @@ fn resize_pty(session_id: String, cols: u32, rows: u32) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn get_remote_cwd(
-    host: String,
-    port: u16,
-    user: String,
-    pass: String,
-    key_path: Option<String>,
-) -> Result<String, String> {
-    let addr_str = format!("{}:{}", host, port);
-    let sock_addr: SocketAddr = addr_str
-        .parse()
-        .or_else(|_| {
-            addr_str
-                .to_socket_addrs()
-                .map_err(|e| e.to_string())
-                .and_then(|mut a| a.next().ok_or_else(|| "could not resolve host".into()))
-        })
-        .map_err(|e| e.to_string())?;
-
-    let tcp = TcpStream::connect_timeout(&sock_addr, Duration::from_secs(8))
-        .map_err(|e| e.to_string())?;
-
-    let mut sess = Session::new().map_err(|e| e.to_string())?;
-    sess.set_timeout(8_000);
-    sess.set_tcp_stream(tcp);
-    widen_algo_prefs(&sess);
-    sess.handshake().map_err(|e| e.to_string())?;
-
-    let pass = Zeroizing::new(pass);
-    let mut authed = false;
-    if let Some(ref kp) = key_path {
-        let pk = Path::new(kp);
-        if sess.userauth_pubkey_file(&user, None, pk, None).is_ok() && sess.authenticated() {
-            authed = true;
-        }
-    }
-    if !authed {
-        if sess.userauth_password(&user, &*pass).is_ok() && sess.authenticated() {
-            authed = true;
-        }
-    }
-    if !authed {
-        let mut kbd = PasswordKbdAuth((*pass).clone());
-        if sess.userauth_keyboard_interactive(&user, &mut kbd).is_ok() && sess.authenticated() {
-            authed = true;
-        }
-    }
-    if !authed {
-        return Err("authentication failed".into());
-    }
-
-    let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
-    channel.exec("pwd").map_err(|e| e.to_string())?;
-    let mut output = String::new();
-    channel.read_to_string(&mut output).map_err(|e| e.to_string())?;
-    channel.wait_close().ok();
-
-    Ok(output.trim().to_string())
-}
-
-#[tauri::command]
 fn stop_ssh_session(session_id: String) -> Result<(), String> {
     let tx = SESS_TX.lock().map_err(|_| "lock poisoned".to_string())?.remove(&session_id);
     if let Some(tx) = tx {
@@ -1269,7 +1209,6 @@ fn main() {
         start_ssh_session,
         send_ssh_input,
         stop_ssh_session,
-        get_remote_cwd,
         resize_pty,
         upload_file_scp,
         list_remote_dir,
