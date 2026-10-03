@@ -5,11 +5,14 @@
 //! AES-256-GCM encrypted file in the app data dir. The key sits next to it with
 //! owner-only permissions: this keeps passwords out of plain sight, but anything
 //! running as the user can read them, which the Keychain would not allow.
+//!
+//! Passwords older versions put in the Keychain are deliberately not read back:
+//! that costs one or two prompts per entry, which is exactly what this avoids.
 
 use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
@@ -26,10 +29,6 @@ static LOCK: Mutex<()> = Mutex::new(());
 #[derive(Default, Serialize, Deserialize)]
 struct Vault {
     passwords: BTreeMap<String, String>,
-    /// Ids whose old Keychain entry was already looked up (moved here, absent or
-    /// denied), so the Keychain is never asked about them again.
-    #[serde(default)]
-    legacy_checked: BTreeSet<String>,
 }
 
 impl Drop for Vault {
@@ -120,38 +119,21 @@ fn with_vault<T>(dir: &Path, f: impl FnOnce(&mut Vault) -> (T, bool)) -> Result<
     Ok(out)
 }
 
-/// Look up a password. `legacy` is called at most once per id to move an entry
-/// saved by older versions (in the Keychain) into this store.
-pub fn get(dir: &Path, id: &str, legacy: impl FnOnce() -> Option<String>) -> Result<Option<String>, String> {
-    with_vault(dir, |v| {
-        if let Some(p) = v.passwords.get(id) {
-            return (Some(p.clone()), false);
-        }
-        if v.legacy_checked.contains(id) {
-            return (None, false);
-        }
-        let found = legacy();
-        if let Some(p) = &found {
-            v.passwords.insert(id.to_string(), p.clone());
-        }
-        v.legacy_checked.insert(id.to_string());
-        (found, true)
-    })
+pub fn get(dir: &Path, id: &str) -> Result<Option<String>, String> {
+    with_vault(dir, |v| (v.passwords.get(id).cloned(), false))
 }
 
 pub fn set(dir: &Path, id: &str, password: &str) -> Result<(), String> {
     with_vault(dir, |v| {
         v.passwords.insert(id.to_string(), password.to_string());
-        v.legacy_checked.insert(id.to_string());
         ((), true)
     })
 }
 
 pub fn delete(dir: &Path, id: &str) -> Result<(), String> {
     with_vault(dir, |v| {
-        v.passwords.remove(id);
-        v.legacy_checked.insert(id.to_string());
-        ((), true)
+        let removed = v.passwords.remove(id).is_some();
+        ((), removed)
     })
 }
 
@@ -166,26 +148,16 @@ mod tests {
     #[test]
     fn set_get_delete_round_trip() {
         let dir = temp_dir();
-        assert_eq!(get(&dir, "a", || None).unwrap(), None);
+        assert_eq!(get(&dir, "a").unwrap(), None);
         set(&dir, "a", "hunter2").unwrap();
         set(&dir, "b", "pässwörd").unwrap();
-        assert_eq!(get(&dir, "a", || panic!("no legacy lookup")).unwrap().as_deref(), Some("hunter2"));
-        assert_eq!(get(&dir, "b", || None).unwrap().as_deref(), Some("pässwörd"));
+        assert_eq!(get(&dir, "a").unwrap().as_deref(), Some("hunter2"));
+        assert_eq!(get(&dir, "b").unwrap().as_deref(), Some("pässwörd"));
         delete(&dir, "a").unwrap();
-        assert_eq!(get(&dir, "a", || panic!("no legacy lookup")).unwrap(), None);
+        assert_eq!(get(&dir, "a").unwrap(), None);
         // Stored encrypted, not as plain text.
         let raw = fs::read(dir.join(DATA_FILE)).unwrap();
         assert!(!raw.windows(7).any(|w| w == b"hunter2"));
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn legacy_is_migrated_once() {
-        let dir = temp_dir();
-        assert_eq!(get(&dir, "x", || Some("old".into())).unwrap().as_deref(), Some("old"));
-        assert_eq!(get(&dir, "x", || panic!("asked twice")).unwrap().as_deref(), Some("old"));
-        assert_eq!(get(&dir, "y", || None).unwrap(), None);
-        assert_eq!(get(&dir, "y", || panic!("asked twice")).unwrap(), None);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -194,10 +166,10 @@ mod tests {
         let dir = temp_dir();
         set(&dir, "a", "secret").unwrap();
         fs::write(dir.join(KEY_FILE), [7u8; 32]).unwrap();
-        assert_eq!(get(&dir, "a", || None).unwrap(), None);
+        assert_eq!(get(&dir, "a").unwrap(), None);
         assert!(dir.join("credentials.unreadable").exists());
         set(&dir, "a", "new").unwrap();
-        assert_eq!(get(&dir, "a", || None).unwrap().as_deref(), Some("new"));
+        assert_eq!(get(&dir, "a").unwrap().as_deref(), Some("new"));
         let _ = fs::remove_dir_all(&dir);
     }
 }

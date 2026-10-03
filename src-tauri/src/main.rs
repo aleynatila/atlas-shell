@@ -1161,14 +1161,7 @@ fn set_credential(app_handle: tauri::AppHandle, id: String, password: String) ->
 #[tauri::command(async)]
 fn get_credential(app_handle: tauri::AppHandle, id: String) -> Result<Option<String>, String> {
     if cfg!(target_os = "macos") {
-        // Move a password saved by an older version out of the Keychain (one
-        // last access prompt per entry).
-        return cred_store::get(&cred_dir(&app_handle)?, &id, || {
-            let entry = Entry::new("atlas", &id).ok()?;
-            let password = entry.get_password().ok()?;
-            let _ = entry.delete_password();
-            Some(password)
-        });
+        return cred_store::get(&cred_dir(&app_handle)?, &id);
     }
     let entry = Entry::new("atlas", &id).map_err(|e| e.to_string())?;
     match entry.get_password() {
