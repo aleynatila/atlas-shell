@@ -9,7 +9,16 @@ jobs:
   build-release:
     permissions:
       contents: write
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: ""
+          # Apple Silicon (M1–M4)
+          - platform: macos-latest
+            args: "--target aarch64-apple-darwin"
+    runs-on: ${{ matrix.platform }}
 
     steps:
       - uses: actions/checkout@v4
@@ -22,6 +31,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
@@ -33,6 +44,7 @@ jobs:
       # modern OpenSSH servers). OpenSSL's Configure needs a full Perl, so make
       # sure Strawberry Perl wins over Git's stripped-down perl on PATH.
       - name: Ensure Strawberry Perl
+        if: matrix.platform == 'windows-latest'
         shell: pwsh
         run: |
           if (-not (Test-Path "C:\Strawberry\perl\bin\perl.exe")) {
@@ -58,6 +70,10 @@ jobs:
             Download the installer below — Atlas will also prompt you to update automatically if you have a previous version installed.
 
             ### Installation
-            Run `atlas___VERSION___x64-setup.exe` and follow the prompts.
+            **Windows:** run `atlas___VERSION___x64-setup.exe` and follow the prompts.
+
+            **macOS (Apple Silicon):** open `atlas___VERSION___aarch64.dmg` and drag Atlas to Applications. The app is not notarized, so on first launch run:
+            `xattr -cr /Applications/atlas.app`
+          args: ${{ matrix.args }}
           releaseDraft: false
           prerelease: false
