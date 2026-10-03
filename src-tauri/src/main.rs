@@ -3,6 +3,7 @@
     windows_subsystem = "windows"
 )]
 
+mod cred_store;
 mod remote_file;
 mod ssh_diag;
 
@@ -1137,19 +1138,38 @@ fn do_scp_download_folder(
     Ok(())
 }
 
-/// Store a password in the OS keychain (Windows Credential Manager / macOS Keychain / SecretService)
+/// Saved passwords live in an encrypted file on macOS (see cred_store) and in
+/// the OS keychain elsewhere (Windows Credential Manager / SecretService).
+fn cred_dir(app_handle: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    app_handle.path().app_data_dir().map_err(|e| e.to_string())
+}
+
+/// Store a saved password.
 #[tauri::command(async)]
-fn set_credential(id: String, password: String) -> Result<(), String> {
+fn set_credential(app_handle: tauri::AppHandle, id: String, password: String) -> Result<(), String> {
     let password = Zeroizing::new(password);
+    if cfg!(target_os = "macos") {
+        return cred_store::set(&cred_dir(&app_handle)?, &id, &password);
+    }
     Entry::new("atlas", &id)
         .map_err(|e| e.to_string())?
         .set_password(&*password)
         .map_err(|e| e.to_string())
 }
 
-/// Retrieve a password from the OS keychain. Returns None if not found.
+/// Retrieve a saved password. Returns None if not found.
 #[tauri::command(async)]
-fn get_credential(id: String) -> Result<Option<String>, String> {
+fn get_credential(app_handle: tauri::AppHandle, id: String) -> Result<Option<String>, String> {
+    if cfg!(target_os = "macos") {
+        // Move a password saved by an older version out of the Keychain (one
+        // last access prompt per entry).
+        return cred_store::get(&cred_dir(&app_handle)?, &id, || {
+            let entry = Entry::new("atlas", &id).ok()?;
+            let password = entry.get_password().ok()?;
+            let _ = entry.delete_password();
+            Some(password)
+        });
+    }
     let entry = Entry::new("atlas", &id).map_err(|e| e.to_string())?;
     match entry.get_password() {
         Ok(p) => Ok(Some(p)),
@@ -1158,9 +1178,12 @@ fn get_credential(id: String) -> Result<Option<String>, String> {
     }
 }
 
-/// Delete a password from the OS keychain. Silently succeeds if not found.
+/// Delete a saved password. Silently succeeds if not found.
 #[tauri::command(async)]
-fn delete_credential(id: String) -> Result<(), String> {
+fn delete_credential(app_handle: tauri::AppHandle, id: String) -> Result<(), String> {
+    if cfg!(target_os = "macos") {
+        return cred_store::delete(&cred_dir(&app_handle)?, &id);
+    }
     let entry = Entry::new("atlas", &id).map_err(|e| e.to_string())?;
     match entry.delete_password() {
         Ok(_) => Ok(()),
