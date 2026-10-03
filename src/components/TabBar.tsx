@@ -12,6 +12,7 @@ import {
     X,
 } from "lucide-react";
 import { memo, useRef, useState } from "react";
+import { IS_MAC, MAC_TRAFFIC_LIGHTS_WIDTH } from "../lib/platform";
 import { adaptColor, type TabPane } from "../types";
 
 interface TabBarProps {
@@ -86,6 +87,15 @@ export const TabBar = memo(function TabBar({
         data-tauri-drag-region
         className="hx-tabbar flex items-stretch border-b border-white/10 shrink-0 h-9 w-full relative select-none overflow-hidden"
       >
+        {/* macOS: room for the native traffic lights overlaid here */}
+        {IS_MAC && (
+          <div
+            data-tauri-drag-region
+            className="shrink-0 h-full"
+            style={{ width: MAC_TRAFFIC_LIGHTS_WIDTH }}
+          />
+        )}
+
         {/* Settings — far left */}
         <button
           onMouseDown={(e) => e.stopPropagation()}
@@ -354,7 +364,8 @@ export const TabBar = memo(function TabBar({
           <div data-tauri-drag-region className="flex-1 h-full min-w-4" />
         </div>
 
-        {/* Window controls */}
+        {/* Window controls (macOS uses the native traffic lights) */}
+        {!IS_MAC && (
         <div className="shrink-0 flex items-center">
           <button
             onMouseDown={(e) => e.stopPropagation()}
@@ -381,6 +392,7 @@ export const TabBar = memo(function TabBar({
             <X size={14} />
           </button>
         </div>
+        )}
       </div>
 
       {/* Tab drag ghost */}

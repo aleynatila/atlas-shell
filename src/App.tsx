@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { LogicalPosition } from "@tauri-apps/api/dpi";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { ScriptsBar } from "./components/ScriptsBar";
 import {
@@ -18,6 +19,7 @@ import { StatusBar } from "./components/StatusBar";
 import { TabBar } from "./components/TabBar";
 import { TerminalPane } from "./components/TerminalPane";
 import { useCustomThemes } from "./hooks/useCustomThemes";
+import { IS_MAC, MAC_TRAFFIC_LIGHTS } from "./lib/platform";
 import { useSessionVault } from "./hooks/useSessionVault";
 import {
     useGeneralSettings,
@@ -339,8 +341,19 @@ function App() {
         title: tab.sessionEntry.label,
         width: 1000,
         height: 650,
-        decorations: false,
         resizable: true,
+        // macOS: native traffic lights over the tab bar, like the main window.
+        ...(IS_MAC
+          ? {
+              decorations: true,
+              titleBarStyle: "overlay" as const,
+              hiddenTitle: true,
+              trafficLightPosition: new LogicalPosition(
+                MAC_TRAFFIC_LIGHTS.x,
+                MAC_TRAFFIC_LIGHTS.y,
+              ),
+            }
+          : { decorations: false }),
       });
     } catch (err) {
       console.error("Failed to detach window:", err);
