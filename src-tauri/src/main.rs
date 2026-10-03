@@ -218,6 +218,11 @@ fn start_ssh_session(
                                     let mut hook_last_data: Option<std::time::Instant> = None;
                                     let mut hook_sent_at = std::time::Instant::now();
                                     let mut hook_held = String::new();
+                                    // True while the user has typed into the prompt without
+                                    // submitting it. The hook must not be sent then: it would be
+                                    // appended to their half-typed command (`cd /x __atlas_cwd(){…`)
+                                    // and fail with a bash syntax error.
+                                    let mut line_dirty = false;
                                     // Input that woke the idle wait below; handled at the top of the
                                     // next drain.
                                     let mut woken_by: Option<InputMessage> = None;
@@ -291,6 +296,14 @@ fn start_ssh_session(
                                             match next {
                                                 Ok(InputMessage::Data(d)) => {
                                                     got_input = true;
+                                                    if hook_state == 0 && !d.is_empty() {
+                                                        // Enter, Ctrl-C and Ctrl-U leave an empty line;
+                                                        // anything typed after the last one doesn't.
+                                                        line_dirty = match d.iter().rposition(|&b| matches!(b, b'\r' | b'\n' | 0x03 | 0x15)) {
+                                                            Some(i) => i + 1 < d.len(),
+                                                            None => true,
+                                                        };
+                                                    }
                                                     let _ = channel.write_all(&d);
                                                 }
                                                 Ok(InputMessage::Resize(c, r)) => {
@@ -305,12 +318,14 @@ fn start_ssh_session(
                                             }
                                         }
                                         if hook_state == 0 {
-                                            if got_data {
+                                            // Input counts too, so after Enter we wait for the
+                                            // command's output to settle instead of firing at once.
+                                            if got_data || got_input {
                                                 hook_last_data = Some(std::time::Instant::now());
                                             }
                                             let quiet = hook_last_data
                                                 .map_or(false, |t| t.elapsed().as_millis() >= 250);
-                                            if quiet || hook_started.elapsed().as_secs() >= 3 {
+                                            if !line_dirty && (quiet || hook_started.elapsed().as_secs() >= 3) {
                                                 // Leading space keeps it out of history; shells other
                                                 // than bash/zsh just ignore it.
                                                 let _ = channel.write_all(
