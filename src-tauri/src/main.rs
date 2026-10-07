@@ -101,6 +101,61 @@ fn widen_algo_prefs(sess: &Session) {
     }
 }
 
+/// Whether the last `ESC[?{mode}h` / `ESC[?{mode}l` in `s` turned the DEC
+/// private mode on; `None` if `s` doesn't mention it.
+fn dec_mode_last(s: &str, mode: &str) -> Option<bool> {
+    let on = s.rfind(&format!("\x1b[?{mode}h"));
+    let off = s.rfind(&format!("\x1b[?{mode}l"));
+    if on.is_none() && off.is_none() { None } else { Some(on > off) }
+}
+
+/// Whether the tail of the output looks like a shell waiting at its prompt.
+/// bash ≥ 5.1 and zsh turn bracketed paste on while their line editor reads a
+/// line and off once it's submitted; older bash is recognised by a prompt line
+/// ending in `$ `, `# ` or `% `. A login banner that paused mid-way, a password
+/// prompt or a running command matches neither.
+fn at_shell_prompt(tail: &str) -> bool {
+    if let Some(on) = dec_mode_last(tail, "2004") {
+        return on;
+    }
+    let line = tail.rsplit(['\n', '\r']).next().unwrap_or("");
+    let mut visible = String::new();
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            if !c.is_control() {
+                visible.push(c);
+            }
+            continue;
+        }
+        match chars.next() {
+            // CSI: parameters up to a final byte in @..~
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // OSC (window title etc.): up to BEL or ESC \
+            Some(']') => {
+                while let Some(c) = chars.next() {
+                    if c == '\x07' {
+                        break;
+                    }
+                    if c == '\x1b' {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let trimmed = visible.trim_end();
+    trimmed.len() < visible.len() && trimmed.ends_with(['$', '#', '%'])
+}
+
 #[tauri::command]
 fn start_ssh_session(
     app_handle: tauri::AppHandle,
@@ -211,14 +266,22 @@ fn start_ssh_session(
                                     let mut keepalive_timer = std::time::Instant::now();
                                     // One-time cwd hook (OSC 7) so the file browser can open where the
                                     // user `cd`'d to. 0 = waiting for the first prompt, 1 = sent and
-                                    // hiding its echo, 2 = done. Sent only after the login banner has
-                                    // gone quiet; its echo is held back until the first OSC 7 arrives
-                                    // (or a timeout, so non-bash/zsh shells still show what happened).
+                                    // hiding its echo, 2 = done. Sent only once the output has gone
+                                    // quiet at something that looks like a shell prompt (see
+                                    // at_shell_prompt) — typing it during a paused login banner or
+                                    // into a running program left it visible on screen. Its echo is
+                                    // held back until the first OSC 7 arrives (or a timeout, so
+                                    // non-bash/zsh shells still show what happened).
                                     let mut hook_state: u8 = 0;
                                     let hook_started = std::time::Instant::now();
                                     let mut hook_last_data: Option<std::time::Instant> = None;
                                     let mut hook_sent_at = std::time::Instant::now();
                                     let mut hook_held = String::new();
+                                    // Last ~1 KB of output while waiting, for the prompt check.
+                                    let mut hook_tail = String::new();
+                                    // vim, less, htop… run on the alternate screen; never type
+                                    // the hook into them.
+                                    let mut alt_screen = false;
                                     // True while the user has typed into the prompt without
                                     // submitting it. The hook must not be sent then: it would be
                                     // appended to their half-typed command (`cd /x __atlas_cwd(){…`)
@@ -274,6 +337,19 @@ fn start_ssh_session(
                                                 hook_state = 2;
                                             }
                                         }
+                                        if hook_state == 0 && !combined.is_empty() {
+                                            hook_tail.push_str(&combined);
+                                            if hook_tail.len() > 1024 {
+                                                let mut cut = hook_tail.len() - 1024;
+                                                while !hook_tail.is_char_boundary(cut) {
+                                                    cut += 1;
+                                                }
+                                                hook_tail.drain(..cut);
+                                            }
+                                            if let Some(on) = dec_mode_last(&hook_tail, "1049") {
+                                                alt_screen = on;
+                                            }
+                                        }
                                         if !combined.is_empty() {
                                             // take() moves the buffer into the event without copying;
                                             // combined is replaced with an empty String (no alloc here).
@@ -326,7 +402,13 @@ fn start_ssh_session(
                                             }
                                             let quiet = hook_last_data
                                                 .map_or(false, |t| t.elapsed().as_millis() >= 250);
-                                            if !line_dirty && (quiet || hook_started.elapsed().as_secs() >= 3) {
+                                            if hook_started.elapsed().as_secs() >= 15 {
+                                                // No prompt recognised in time (odd prompt, or the
+                                                // user is already in a REPL): skip the hook rather
+                                                // than risk typing it into something else.
+                                                hook_state = 2;
+                                                hook_tail = String::new();
+                                            } else if !line_dirty && quiet && !alt_screen && at_shell_prompt(&hook_tail) {
                                                 // Leading space keeps it out of history; shells other
                                                 // than bash/zsh just ignore it.
                                                 let _ = channel.write_all(
